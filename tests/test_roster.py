@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from modules.shift_reminder.roster import (
+    MAX_ROSTER_LINES,
     ROOM_LABELS,
     SHIFT_COUNT,
     RosterImportError,
@@ -400,3 +401,63 @@ def test_room_labels_cover_every_room_type_in_fixtures() -> None:
     seen = {room["room"] for shift in roster["shifts"] for room in shift["rooms"]}
     assert seen, "fixture 里应当有房间"
     assert seen <= set(ROOM_LABELS)
+
+
+# --- 长度上限（V1.5.4：别让提醒刷屏） ----------------------------------------
+
+
+def _displayable_room(n: int) -> dict[str, Any]:
+    """第 n 间可显示的房间；干员名带上序号，方便断言截断截在了哪。"""
+    return {"room": "manufacture", "index": n, "operators": [f"干员{n}"], "skipped": False}
+
+
+def test_render_roster_lines_at_exactly_the_limit_has_no_ellipsis() -> None:
+    """恰好用满额度时不出现省略提示，且内容与加限制之前一致。"""
+    body_budget = MAX_ROSTER_LINES - 1  # 扣掉标题那一行
+    lines = render_roster_lines(
+        _roster_with([_displayable_room(i) for i in range(1, body_budget + 1)]), 1
+    )
+
+    assert len(lines) == MAX_ROSTER_LINES
+    assert not any("未显示" in line for line in lines), "没超限就不该有省略提示"
+    assert lines[0] == "【本班配制】"
+    assert lines[1] == "制造站1：干员1"
+    assert lines[-1] == f"制造站{body_budget}：干员{body_budget}"
+
+
+def test_render_roster_lines_ellipsis_counts_the_omitted_rooms() -> None:
+    """超限时截断，且提示里的数字**等于真被省略的项数**（最容易算错的地方）。"""
+    total = MAX_ROSTER_LINES + 3
+    lines = render_roster_lines(
+        _roster_with([_displayable_room(i) for i in range(1, total + 1)]), 1
+    )
+
+    assert len(lines) == MAX_ROSTER_LINES, "截断后总行数不得超上限"
+    assert lines[0] == "【本班配制】"
+    shown_rooms = len(lines) - 2  # 扣掉标题行与省略提示行
+    assert shown_rooms > 0, "额度再小也该显示至少一间房，否则等于没有信息"
+    assert lines[-1] == f"……还有 {total - shown_rooms} 间未显示"
+
+
+@pytest.mark.parametrize("count", range(1, 15))
+def test_render_roster_lines_never_exceeds_the_limit(count: int) -> None:
+    """边界扫描：从 1 间到远超上限，返回值都不许超过 MAX_ROSTER_LINES。"""
+    lines = render_roster_lines(
+        _roster_with([_displayable_room(i) for i in range(1, count + 1)]), 1
+    )
+    assert len(lines) <= MAX_ROSTER_LINES
+
+
+def test_render_roster_lines_skipped_rooms_neither_show_nor_count_as_omitted() -> None:
+    """标了「不动」的房间不占额度，也不算进「未显示」的数字里。"""
+    displayable = MAX_ROSTER_LINES + 3
+    rooms = [_displayable_room(i) for i in range(1, displayable + 1)]
+    for i in range(1, 4):
+        rooms.insert(0, {"room": "dormitory", "index": i, "operators": ["甲"], "skipped": True})
+
+    lines = render_roster_lines(_roster_with(rooms), 1)
+
+    assert len(lines) == MAX_ROSTER_LINES
+    assert "宿舍" not in "".join(lines), "标了不动的房间不该出现"
+    shown_rooms = len(lines) - 2
+    assert lines[-1] == f"……还有 {displayable - shown_rooms} 间未显示"

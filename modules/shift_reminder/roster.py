@@ -18,6 +18,7 @@ from typing import Any
 from .schedule_file import PlanAssignment
 
 __all__ = [
+    "MAX_ROSTER_LINES",
     "ROOM_LABELS",
     "SHIFT_COUNT",
     "RosterImportError",
@@ -30,6 +31,17 @@ __all__ = [
 
 #: 本插件固定三班；排班表的 ``plans`` 数量必须与它一致（裁决见 implementation.md §2.6）。
 SHIFT_COUNT = 3
+
+#: `render_roster_lines` 返回的**总行数**上限（含标题与省略提示行）。
+#:
+#: 取值理由：这是**体验取舍，不是技术限制**。QQ 消息在手机上一屏大约十几行，
+#: 而换班提醒本身已经占了 3~4 行（换班时刻、当前班、即将班），留给「本班配制」
+#: 的余量取 8 行——足够把常见的三四个房间说完，又不至于把消息顶成一整屏。
+#: 真实排班表单班可达 8~10 个房间、十几个干员名，没有上限就会刷屏。
+#:
+#: **语义是总行数而不是房间行数**：这样「承诺的上限」与用户实际看到的行数一致，
+#: 截断后再加省略提示行也不会超出。
+MAX_ROSTER_LINES = 8
 
 #: 房型英文键 → 中文名。排班表里是游戏内部的英文房型名，直接发给用户看不懂。
 #: 未知房型**原样显示英文键**而不是丢弃——丢一间房等于给错名单，比显示一个生词更糟。
@@ -249,14 +261,19 @@ def render_roster_lines(roster: Mapping[str, Any] | None, plan_index: int) -> li
     渲染进提醒就等于让用户去改一间不该改的房——那是**错误指令**，不是冗余信息
     （裁决见 docs/implementation/implementation.md §2.6）。干员为空的房间同样不占行。
 
+    **有长度上限**：房间多的时候会把提醒顶成一整屏，所以返回的行数受
+    `MAX_ROSTER_LINES` 限制——它是**总行数**上限（含 `【本班配制】` 标题与省略提示行）。
+    超出时截断，并在最后一行注明**还有多少间未显示**（`……还有 N 间未显示`）：
+    默默砍掉会让用户以为这就是全部，那比不显示更糟。
+
     Args:
         roster: `build_roster` 的产物；从未导入过时为 None。
         plan_index: 班次下标，**从 1 开始**（与 `build_roster` 写入的一致）。
 
     Returns:
-        可直接拼进 ``notify.render_reminder(extra=...)`` 的行列表。未导入、数据形状
-        不对、下标越界、或该班没有任何可显示的房间时返回**空列表**——调用方据此
-        保持「没导入过排班表就与从前完全一样」的行为。
+        可直接拼进 ``notify.render_reminder(extra=...)`` 的行列表，**长度不超过
+        `MAX_ROSTER_LINES`**。未导入、数据形状不对、下标越界、或该班没有任何可显示
+        的房间时返回**空列表**——调用方据此保持「没导入过排班表就与从前完全一样」的行为。
     """
     if not isinstance(roster, Mapping):
         return []
@@ -298,4 +315,15 @@ def render_roster_lines(roster: Mapping[str, Any] | None, plan_index: int) -> li
 
     if not body:
         return []
-    return ["【本班配制】", *body]
+
+    header = "【本班配制】"
+    # 上限是**总行数**：先扣掉标题占的那一行，剩下的才是房间行能用的额度。
+    body_budget = MAX_ROSTER_LINES - 1
+    if len(body) <= body_budget:
+        return [header, *body]
+
+    # 超限时还得给省略提示留一行，否则「截断后总行数不超过上限」这条就破了。
+    # `max(0, ...)` 是为了让常量被改得极小时函数依然自洽（不出现负数切片）。
+    shown = max(0, body_budget - 1)
+    omitted = len(body) - shown
+    return [header, *body[:shown], f"……还有 {omitted} 间未显示"]
