@@ -31,8 +31,9 @@ ban-relative-imports = "parents"
 # 注意：core/module.py 与 core/registry.py **不在此列**——它们刻意零框架依赖，
 # 提前开例外等于给自己留后门（独立审查意见）。真需要时再加。
 "main.py" = ["TID"]
-"core/storage.py" = ["TID"]
-"modules/*/module.py" = ["TID"]
+# 装配层允许父级相对导入：插件以包形式被 AstrBot 加载时 `core` 不在 sys.path，
+# `from ..core.x import y` 是唯一可达方式（审查/裁定见 docs/architecture/extension.md §2）。
+"modules/*/module.py" = ["TID", "TID252"]
 "tests/*" = ["TID", "SIM"]
 
 [lint.isort]

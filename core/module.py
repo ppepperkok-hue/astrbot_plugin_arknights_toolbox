@@ -61,10 +61,19 @@ class Module(ABC):
         实现应保证**可安全重复调用**：宿主回滚一次失败的启动之后，框架不会再调它。
         """
 
-    def commands(self) -> list:
-        """该模块自己注册的指令（默认无）。"""
-        return []
+    async def handle_command(self, command: str, event: Any) -> bool:
+        """处理 ``/ak <command>``。
 
-    def jobs(self) -> list:
-        """该模块自己注册的定时任务（默认无）。"""
-        return []
+        AstrBot 的指令是用装饰器在**插件类**上静态注册的，模块无法自行注册，
+        所以 ``/ak`` 由宿主统一注册，再逐个问模块要不要处理这个子命令
+        （见 `docs/architecture/extension.md` §2 的修订说明）。
+
+        Args:
+            command: 子命令名，已由宿主去空白并转小写。
+            event: AstrBot 的 ``AstrMessageEvent``。
+
+        Returns:
+            处理了返回 ``True``，宿主随即停止分发；不认识这个子命令返回 ``False``，
+            宿主会继续问下一个模块，最后统一回「未知子命令」。
+        """
+        return False

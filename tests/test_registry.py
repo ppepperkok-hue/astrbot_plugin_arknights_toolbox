@@ -349,7 +349,9 @@ def test_module_wants_config_argument():
     assert params == ["self", "ctx", "config"]
 
 
-def test_module_default_hooks_are_empty():
+def test_module_default_handle_command_returns_false():
+    """模块不认识的子命令返回 False，由宿主统一回「未知子命令」。"""
+
     class Bare(Module):
         name = "bare"
         config_key = "bare"
@@ -361,8 +363,7 @@ def test_module_default_hooks_are_empty():
             return None
 
     bare = Bare()
-    assert bare.commands() == []
-    assert bare.jobs() == []
+    assert run(bare.handle_command("whatever", object())) is False
 
 
 def test_registry_iteration_exposes_modules():
