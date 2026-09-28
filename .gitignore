@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# AstrBot runtime data — never commit
+data/
+config/
+
+# local & editor
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# secrets — never commit
+.env
+*.pem
+secrets/
