@@ -47,6 +47,14 @@ class RoomAssignment:
     operators: tuple[str, ...]
     """干员名，已滤掉空串与非字符串；**至少一个**（空条目会被跳过）。"""
 
+    skipped: bool = False
+    """``skip: true`` —— 排班表作者标明**这一班这一间房不要动**。
+
+    解析器**照实保留**这个标记、**不**把房间过滤掉：丢数据调用方就看不见了。
+    是否渲染由渲染层决定——把「不要动」的房间渲染成「去换这间房的人」是
+    **错误信息**而不是多余信息，所以默认不渲染（裁决见 implementation.md §2.6）。
+    """
+
 
 @dataclass(frozen=True)
 class PlanAssignment:
@@ -137,9 +145,25 @@ def _parse_room(room_type: str, entries: Any, label: str) -> list[RoomAssignment
         operators = _operators_of(entry)
         if operators:
             assignments.append(
-                RoomAssignment(room=room_type, index=position + 1, operators=operators)
+                RoomAssignment(
+                    room=room_type,
+                    index=position + 1,
+                    operators=operators,
+                    skipped=_is_skipped(entry),
+                )
             )
     return assignments
+
+
+def _is_skipped(entry: Any) -> bool:
+    """该条目是否被标记为「不动」。
+
+    非 dict、缺字段、字段非真值都算 `False`——真实样本里 ``skip`` 恒为布尔，
+    这里只做防御，不把缺失当成「不动」（那会多滤掉一片本该提醒的房间）。
+    """
+    if not isinstance(entry, dict):
+        return False
+    return bool(entry.get("skip"))
 
 
 def _operators_of(entry: Any) -> tuple[str, ...]:

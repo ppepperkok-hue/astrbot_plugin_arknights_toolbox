@@ -28,8 +28,9 @@ try:  # pragma: no cover - 走哪支取决于运行场景，两支都是真实�
 except ImportError:  # pragma: no cover
     from ...core.module import Module
     from ...core.storage import JsonlSendLog, JsonStateStore, SendRecord
-from . import notify, scheduler, webapi
+from . import notify, roster, scheduler, webapi
 from .schedule import ConfigError, Shift, ShiftTable, parse_hhmm, validate
+from .schedule_file import ScheduleFileError, parse_schedule_file
 from .strategy import PeriodStrategy
 
 PLUGIN_NAME = "astrbot_plugin_arknights_toolbox"
@@ -48,7 +49,7 @@ STATUS_RECENT = 5
 DEFAULT_LEAD_MINUTES = 10
 
 # 指令权限模型：私聊一律放行；群聊要求 AstrBot 管理员。
-COMMAND_NAMES = ("bind", "test", "status")
+COMMAND_NAMES = ("bind", "status", "test", "import")
 
 
 def command_allowed(command: str, *, is_group: bool, is_admin: bool) -> tuple[bool, str]:
@@ -218,6 +219,8 @@ class ShiftReminderModule(Module):
         self._job_ids: list[str] = []
         self._lead_minutes = DEFAULT_LEAD_MINUTES
         self._tz: ZoneInfo | None = None
+        # `/ak import` 只认这个目录里的文件；由 initialize 填好（见 resolve_import_path）。
+        self._data_dir: Path | None = None
 
     # --- 生命周期 -----------------------------------------------------------
 
@@ -240,6 +243,7 @@ class ShiftReminderModule(Module):
         self._lead_minutes = lead_minutes
         self._tz = _load_timezone(timezone)
         self._strategy = PeriodStrategy(table, lead_minutes)
+        self._data_dir = data_dir
         self._store = JsonStateStore(data_dir / "state.json")
         self._send_log = JsonlSendLog(data_dir / "sends.jsonl", keep=SEND_LOG_KEEP)
         self._job_ids = []
@@ -404,6 +408,7 @@ class ShiftReminderModule(Module):
             "bind": self._cmd_bind,
             "test": self._cmd_test,
             "status": self._cmd_status,
+            "import": self._cmd_import,
         }
         handler = handlers.get(command)
         if handler is None:
@@ -478,6 +483,60 @@ class ShiftReminderModule(Module):
             else "正常"
         )
         await self._reply(event, f"{body}\n绑定目标：{binding}\n推送状态：{breaker}")
+
+    async def _cmd_import(self, event: Any) -> None:
+        """``/ak import <文件名>``：把数据目录下的排班表读进来并落盘。
+
+        文件名来自用户消息，所以**先过 `roster.resolve_import_path` 再做任何读取**：
+        校验不通过时连 `is_file()` 都不调用（见该函数的说明）。
+
+        成功与失败的每条路径都要有回执——用户看不到结果就无从自查
+        （项目宪法 §2 第 2 条）。
+        """
+        data_dir, store = self._data_dir, self._store
+        if data_dir is None or store is None:
+            await self._reply(event, "换班提醒模块尚未初始化完成，请稍后重试。")
+            return
+
+        raw_name = roster.parse_import_argument(str(event.message_str or ""))
+        try:
+            path = roster.resolve_import_path(data_dir, raw_name)
+        except roster.RosterImportError as exc:
+            await self._reply(event, f"{exc}\n数据目录：{data_dir}")
+            return
+
+        if not path.is_file():
+            await self._reply(
+                event,
+                f"找不到文件：{path.name}\n把排班表 JSON 放进这个目录再试：{data_dir}",
+            )
+            return
+
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            logger.warning("[ak_toolbox][shift_reminder] 读取排班表失败：%s", exc)
+            await self._reply(event, f"读取文件失败：{exc}")
+            return
+
+        try:
+            imported = roster.build_roster(
+                parse_schedule_file(text),
+                source=path.name,
+                imported_at=self._now(),
+            )
+        except (ScheduleFileError, roster.RosterImportError) as exc:
+            logger.warning("[ak_toolbox][shift_reminder] 导入排班表失败：%s", exc)
+            await self._reply(event, f"导入失败：{exc}")
+            return
+
+        store.set(ROSTER_KEY, imported)
+        logger.info(
+            "[ak_toolbox][shift_reminder] 已导入排班表 %s（%d 个班次）",
+            path.name,
+            imported["shift_count"],
+        )
+        await self._reply(event, f"{roster.describe_roster(imported)}\n来源：{path.name}")
 
     # --- WebUI（页面只是另一种入口；数据一律复用上面的既有实现） -----------
 
