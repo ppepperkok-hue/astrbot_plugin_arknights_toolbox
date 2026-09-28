@@ -48,6 +48,49 @@ def _install_astrbot_stub() -> None:
             self.parts.append(text)
             return self
 
+    class AstrMessageEvent:
+        """够用的假事件：宿主与模块只用到这几个属性/方法。"""
+
+        def __init__(self, message_str: str = "", umo: str = "test:FriendMessage:1") -> None:
+            self.message_str = message_str
+            self.unified_msg_origin = umo
+            self.stopped = False
+
+        def plain_result(self, text: str) -> str:
+            return text
+
+        def stop_event(self) -> None:
+            self.stopped = True
+
+        def is_private_chat(self) -> bool:
+            return True
+
+        def is_admin(self) -> bool:
+            return False
+
+    class MessageEventResult:
+        """占位：`main.py` 只把它用作返回类型注解。"""
+
+    class _StubFilter:
+        """够用的 filter：`command` 装饰器原样返回函数（不注册任何东西）。"""
+
+        @staticmethod
+        def command(*_args: Any, **_kwargs: Any):
+            def decorator(func: Any) -> Any:
+                return func
+
+            return decorator
+
+    class Star:
+        """够用的 Star 基类：只保留 `__init__` 的签名与 context。"""
+
+        def __init__(self, context: Any = None, config: Any = None) -> None:
+            self.context = context
+            self.config = config
+
+    class Context:
+        """占位类型（真实的 Context 由 AstrBot 提供）。"""
+
     class _StubQuery:
         """够用的 query 代理：装配层只用 `get`。"""
 
@@ -55,9 +98,16 @@ def _install_astrbot_stub() -> None:
             return default
 
     class _StubRequest:
-        """够用的 request 代理：只补被 import 到的 `query`。"""
+        """够用的 request 代理：只补被 import 到的 `query` 与 `json`。
+
+        `json()` 默认返回 `default`（等同空请求体）；需要给请求体的测试用
+        `monkeypatch.setattr(_StubRequest, "json", ...)` 覆盖即可。
+        """
 
         query = _StubQuery()
+
+        async def json(self, default: Any = None) -> Any:
+            return default
 
     def get_astrbot_plugin_data_path() -> str:
         """默认给一个不会污染仓库的位置；需要时由测试 monkeypatch 覆盖。"""
@@ -73,15 +123,23 @@ def _install_astrbot_stub() -> None:
 
     api.logger = _StubLogger()
     event.MessageChain = MessageChain
+    event.AstrMessageEvent = AstrMessageEvent
+    event.MessageEventResult = MessageEventResult
+    event.filter = _StubFilter()
     web.json_response = json_response
     web.error_response = error_response
     web.request = _StubRequest()
     astrbot_path.get_astrbot_plugin_data_path = get_astrbot_plugin_data_path
 
+    star = types.ModuleType("astrbot.api.star")
+    star.Star = Star
+    star.Context = Context
+
     astrbot.api = api
     astrbot.core = core
     api.event = event
     api.web = web
+    api.star = star
     core.utils = utils
     utils.astrbot_path = astrbot_path
 
@@ -91,6 +149,7 @@ def _install_astrbot_stub() -> None:
             "astrbot.api": api,
             "astrbot.api.event": event,
             "astrbot.api.web": web,
+            "astrbot.api.star": star,
             "astrbot.core": core,
             "astrbot.core.utils": utils,
             "astrbot.core.utils.astrbot_path": astrbot_path,

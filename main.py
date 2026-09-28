@@ -16,7 +16,25 @@ from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.star import Context, Star
 from astrbot.api.web import error_response, json_response, request
 
-from .core.registry import ModuleRegistry, build_registry, discover_modules, read_module_switches
+# 两种运行场景的导入差异（与 `modules/shift_reminder/module.py` 同一取舍）：
+#   * AstrBot 以**包**加载插件时顶层是插件自身，只能用相对导入；
+#   * 从仓库根跑 pytest 时（pyproject 配了 `pythonpath = ["."]`）顶层是仓库根，
+#     `core` 可绝对导入，而 `main` 成了一个没有父包的模块 → 相对导入会炸。
+# 先绝对、失败再回退相对，两种场景都能工作，测试也才 import 得动入口。
+try:  # pragma: no cover - 走哪支取决于运行场景，两支都是真实路径
+    from core.registry import (
+        ModuleRegistry,
+        build_registry,
+        discover_modules,
+        read_module_switches,
+    )
+except ImportError:  # pragma: no cover
+    from .core.registry import (
+        ModuleRegistry,
+        build_registry,
+        discover_modules,
+        read_module_switches,
+    )
 
 PLUGIN_NAME = "astrbot_plugin_arknights_toolbox"
 
