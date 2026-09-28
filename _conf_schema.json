@@ -26,7 +26,8 @@
       "shift_3_name": "夜班",
       "shift_3_start": "02:00",
       "shift_3_hours": 6,
-      "lead_minutes": 10
+      "lead_minutes": 10,
+      "timezone": "Asia/Shanghai"
     },
     "items": {
       "shift_1_name": {
@@ -88,6 +89,12 @@
         "description": "提前量（分钟）",
         "hint": "换班时刻提前多久推送提醒。默认 10 分钟，够从手头的事里抽身开游戏。",
         "default": 10
+      },
+      "timezone": {
+        "type": "string",
+        "description": "时区",
+        "hint": "提醒按这个时区的时刻触发。必须写 IANA 时区名，例如 Asia/Shanghai、Asia/Tokyo、UTC；写错会在加载插件时明确报错，不会静默按别的时区跑。留空则使用默认值 Asia/Shanghai。",
+        "default": "Asia/Shanghai"
       }
     }
   }

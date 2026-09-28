@@ -9,6 +9,7 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from astrbot.api import logger
 from astrbot.api.event import MessageChain
@@ -33,7 +34,8 @@ from .strategy import PeriodStrategy
 PLUGIN_NAME = "astrbot_plugin_arknights_toolbox"
 JOB_PREFIX = "ak_toolbox:shift_reminder:"
 UMO_KEY = "bound_umo"
-TIMEZONE = "Asia/Shanghai"
+DEFAULT_TIMEZONE = "Asia/Shanghai"
+TIMEZONE_KEY = "timezone"
 SHIFT_SLOTS = (1, 2, 3)
 SEND_LOG_KEEP = 50
 STATUS_RECENT = 5
@@ -111,6 +113,66 @@ def parse_lead_minutes(config: Mapping[str, Any]) -> int:
     return raw
 
 
+def _load_timezone(key: str) -> ZoneInfo | None:
+    """解析时区名；本机没有时区数据时返回 `None`。
+
+    刻意用 `zoneinfo` 而不是别的库：AstrBot 的调度器
+    （`core/cron/manager.py:235`）注册任务时正是用 `ZoneInfo(job.timezone)` 解析，
+    **取不到就只打一条 WARNING、然后回落到系统时区**。用同一个机制校验，才不会
+    出现「我们说它合法、它却悄悄换了个时区」的错位。
+    """
+    try:
+        return ZoneInfo(key)
+    except Exception:  # noqa: BLE001 - 失败原因不止一种：无数据 / 名字非法 / 路径非法
+        return None
+
+
+def parse_timezone(config: Mapping[str, Any]) -> str:
+    """读取时区名，并校验它**在本机可解析**。三条路径都不静默。
+
+    1. 缺失、`None` 或空白 → 用默认值（老用户的配置文件里没有这个键，必须照常工作）。
+    2. 有值且解析得了 → 原样返回。
+    3. 有值但解析不了 → 若连默认值都解析不了，说明**本机根本没有时区数据**
+       （Windows、精简镜像上常见），此时无法判定名字对错：如实打一条 WARNING
+       说明「AstrBot 会回落到服务器本地时区」并放行——不能因为查不到就拒掉一个
+       可能合法的配置，那会让整个插件加载失败。否则就是名字确实写错了，抛错。
+
+    Args:
+        config: 本模块自己的那一段配置。
+
+    Returns:
+        已校验的 IANA 时区名。
+
+    Raises:
+        ConfigError: 名字可判定为非法，或类型不对。
+    """
+    raw = config.get(TIMEZONE_KEY, DEFAULT_TIMEZONE)
+    if raw is None:
+        return DEFAULT_TIMEZONE
+    if not isinstance(raw, str):
+        raise ConfigError(f"{TIMEZONE_KEY} 必须是字符串，收到 {raw!r}")
+
+    key = raw.strip()
+    if not key:
+        return DEFAULT_TIMEZONE
+
+    if _load_timezone(key) is not None:
+        return key
+
+    if _load_timezone(DEFAULT_TIMEZONE) is None:
+        logger.warning(
+            "[ak_toolbox][shift_reminder] 本机没有可用的时区数据，无法校验 %s=%r；"
+            "将原样交给 AstrBot，届时它可能回落到服务器本地时区（按系统时区跑）。",
+            TIMEZONE_KEY,
+            key,
+        )
+        return key
+
+    raise ConfigError(
+        f"{TIMEZONE_KEY} 不是可识别的 IANA 时区名：{key!r}。例如 Asia/Shanghai、Asia/Tokyo、UTC。"
+    )
+
+
 def stale_job_ids(jobs: Iterable[Any], prefix: str = JOB_PREFIX) -> list[str]:
     """挑出**属于本模块**、（可能）是上一条进程遗留的 job id。
 
@@ -149,12 +211,14 @@ class ShiftReminderModule(Module):
         self._breaker = scheduler.FailureBreaker()
         self._job_ids: list[str] = []
         self._lead_minutes = DEFAULT_LEAD_MINUTES
+        self._tz: ZoneInfo | None = None
 
     # --- 生命周期 -----------------------------------------------------------
 
     async def initialize(self, ctx: Any, config: Mapping[str, Any]) -> None:
         table = parse_shift_table(config)
         lead_minutes = parse_lead_minutes(config)
+        timezone = parse_timezone(config)
 
         data_dir = Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -168,6 +232,7 @@ class ShiftReminderModule(Module):
 
         self._ctx = ctx
         self._lead_minutes = lead_minutes
+        self._tz = _load_timezone(timezone)
         self._strategy = PeriodStrategy(table, lead_minutes)
         self._store = JsonStateStore(data_dir / "state.json")
         self._send_log = JsonlSendLog(data_dir / "sends.jsonl", keep=SEND_LOG_KEEP)
@@ -186,15 +251,16 @@ class ShiftReminderModule(Module):
                 cron_expression=scheduler.reminder_cron_expression(shift, lead_minutes),
                 handler=self._make_handler(shift.name),
                 description=f"{shift.name} 换班提醒（提前 {lead_minutes} 分钟）",
-                timezone=TIMEZONE,
+                timezone=timezone,
                 payload={"shift": shift.name},
             )
             self._job_ids.append(job.job_id)
 
         logger.info(
-            "[ak_toolbox][shift_reminder] 已注册 %d 个换班提醒任务（提前 %d 分钟）",
+            "[ak_toolbox][shift_reminder] 已注册 %d 个换班提醒任务（提前 %d 分钟，时区 %s）",
             len(self._job_ids),
             lead_minutes,
+            timezone,
         )
 
     async def _purge_stale_jobs(self, cron_manager: Any) -> int:
@@ -235,6 +301,35 @@ class ShiftReminderModule(Module):
                 removed += 1
         logger.info("[ak_toolbox][shift_reminder] 已清理 %d 个定时任务", removed)
 
+    # --- 时间 ---------------------------------------------------------------
+
+    def _now(self) -> datetime:
+        """当前时刻，**带上配置的时区**。
+
+        必须带：cron 是按配置时区的墙上时刻触发的，若这里仍用服务器本地时间算
+        「现在第几班」，换个时区之后提醒会在正确时刻触发、却描述错误的班次。
+        本机没有时区数据时（`_tz is None`）退回系统本地时间，与 AstrBot 调度器的
+        回落行为保持一致。
+        """
+        if self._tz is None:
+            return datetime.now()
+        return datetime.now(self._tz)
+
+    # --- 绑定目标（读写封装，为将来「多人各收各的」留门） -------------------
+
+    def _get_target(self) -> str | None:
+        """当前绑定的提醒目标（umo）；未绑定时返回 `None`。
+
+        读写收在一处是为了**把变化点封在一点**：将来若改成「一个实例里多人各收
+        各的」，只需改这两个函数，调用方一行不用动。现在就是单目标、覆盖式改绑。
+        """
+        value = self._store.get(UMO_KEY)
+        return value if isinstance(value, str) and value else None
+
+    def _set_target(self, umo: str) -> None:
+        """把提醒目标改到 `umo`（单目标，覆盖旧值）。"""
+        self._store.set(UMO_KEY, umo)
+
     # --- 推送 ---------------------------------------------------------------
 
     def _make_handler(self, shift_name: str):
@@ -257,7 +352,7 @@ class ShiftReminderModule(Module):
             logger.warning("[ak_toolbox][shift_reminder] 模块尚未初始化，忽略本次触发")
             return
 
-        now = datetime.now()
+        now = self._now()
         snapshot = strategy.snapshot(now)
 
         key = scheduler.idempotency_key(shift_name, snapshot.change_at)
@@ -265,8 +360,8 @@ class ShiftReminderModule(Module):
             logger.info("[ak_toolbox][shift_reminder] %s 的这次提醒已发过，跳过", shift_name)
             return
 
-        umo = store.get(UMO_KEY)
-        if not isinstance(umo, str) or not umo:
+        umo = self._get_target()
+        if umo is None:
             logger.warning(
                 "[ak_toolbox][shift_reminder] 尚未绑定提醒目标，跳过推送；请先发 /ak bind"
             )
@@ -324,16 +419,16 @@ class ShiftReminderModule(Module):
             logger.warning("[ak_toolbox][shift_reminder] 回执发送失败：%s", text)
 
     async def _cmd_bind(self, event: Any) -> None:
-        previous = self._store.get(UMO_KEY)
-        self._store.set(UMO_KEY, event.unified_msg_origin)
-        if isinstance(previous, str) and previous and previous != event.unified_msg_origin:
+        previous = self._get_target()
+        self._set_target(event.unified_msg_origin)
+        if previous is not None and previous != event.unified_msg_origin:
             await self._reply(event, f"已把提醒目标改到本会话（原来是 {previous}）。")
             return
         await self._reply(event, "已绑定：往后换班提醒会发到这个会话。")
 
     async def _cmd_test(self, event: Any) -> None:
         """立刻发一条测试提醒：不写幂等键、不改绑定。"""
-        now = datetime.now()
+        now = self._now()
         snapshot = self._strategy.snapshot(now)
         text = notify.render_reminder(
             ending=snapshot.current,
@@ -348,7 +443,7 @@ class ShiftReminderModule(Module):
             logger.warning("[ak_toolbox][shift_reminder] /ak test 发送失败")
 
     async def _cmd_status(self, event: Any) -> None:
-        now = datetime.now()
+        now = self._now()
         snapshot = self._strategy.snapshot(now)
 
         recent = []
@@ -366,8 +461,7 @@ class ShiftReminderModule(Module):
             recent_sends=recent,
         )
 
-        bound = self._store.get(UMO_KEY)
-        binding = bound if isinstance(bound, str) and bound else "（未绑定）"
+        binding = self._get_target() or "（未绑定）"
         breaker = (
             f"熔断已打开（连续失败 {self._breaker.consecutive_failures} 次）"
             if self._breaker.is_open

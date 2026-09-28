@@ -81,7 +81,7 @@ def _to_shifts(defaults: dict[str, Any]) -> list[Shift]:
 
 
 def test_schema_uses_a_flat_module_section(schema: dict[str, Any]) -> None:
-    """参数收在 `shift_reminder` 段里，十个子键全部扁平。"""
+    """参数收在 `shift_reminder` 段里，子键全部扁平（班次字段 + 提前量）。"""
     assert MODULE_KEY in schema
     assert schema[MODULE_KEY]["type"] == "object"
 
@@ -151,6 +151,14 @@ def test_validate_rejects_a_five_hour_shift(module_defaults: dict[str, Any]) -> 
 
 def test_lead_minutes_default_is_ten(module_defaults: dict[str, Any]) -> None:
     assert module_defaults["lead_minutes"] == 10
+
+
+def test_timezone_default_is_shanghai(module_defaults: dict[str, Any]) -> None:
+    """P1.4：时区默认值必须保持 `Asia/Shanghai`。
+
+    老用户的配置文件里没有这个键，靠这个默认值维持原有行为（向后兼容）。
+    """
+    assert module_defaults["timezone"] == "Asia/Shanghai"
 
 
 def test_items_defaults_match_top_level_default(schema: dict[str, Any]) -> None:
