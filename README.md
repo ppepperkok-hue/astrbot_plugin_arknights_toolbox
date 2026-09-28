@@ -27,6 +27,8 @@
 
 | 文档 | 内容 |
 | --- | --- |
+| [AGENTS.md](AGENTS.md) | **项目宪法**：行为规则、开工前必读清单、工程红线 |
+| [docs/implementation/implementation.md](docs/implementation/implementation.md) | **当前阶段实施真元文档**（V1 的 SSOT） |
 | [docs/project-checklist.md](docs/project-checklist.md) | 立项清单（唯一汇总） |
 | [docs/project-plan/04-positioning-revision.md](docs/project-plan/04-positioning-revision.md) | **定位修订：为什么是工具箱而不是提醒插件** |
 | [docs/project-plan/03-requirements-clarification.md](docs/project-plan/03-requirements-clarification.md) | 需求修订：执行端可选、服务器常开、集成三档 |
