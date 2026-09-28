@@ -48,6 +48,7 @@
 | CI | 校验脚本挂进 `.github/workflows/ci.yml`，与 lint、测试同一条流水线 |
 | 开工声明 | 每次汇报开头声明已加载本文件与当前实施真元文档 |
 | 违规处理 | 发现未加载就开工 → 停下补读再继续 |
+| **跨目录降级方案** | 本项目的 `AGENTS.md` 在独立仓库里，agent 的工作目录若不在本仓库内，**自动加载不会生效**。此时必须：① 开工前用读取工具**全量**读本文件与当前实施真元文档；② 在首次汇报里**显式声明**「已加载 AGENTS.md 与 docs/implementation/implementation.md」；③ 没有这条声明，视为未加载，不许开工。 |
 
 ## 5. 工程红线（引用 skill 的 engineering-essentials）
 
