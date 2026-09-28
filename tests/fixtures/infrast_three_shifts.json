@@ -1,0 +1,112 @@
+{
+  "_comment": "自撰 fixture。结构与 MAA custom_infrast 排班表同源（字段名、嵌套形状一致），内容由本项目自撰，**不是**从任何 AGPL 项目复制的文件。见 tests/test_schedule_file.py 顶部说明。",
+  "author": "toolbox-fixture",
+  "description": "三班制测试样本，结构取自真实排班表格式。",
+  "id": 1000000000000001,
+  "title": "测试用三班表",
+  "planTimes": "3班",
+  "scheduleType": {
+    "planTimes": 3,
+    "trading": 1,
+    "manufacture": 2,
+    "power": 1,
+    "dormitory": 1
+  },
+  "plans": [
+    {
+      "name": "第一班",
+      "description": "12 小时长班",
+      "drones": "trading",
+      "rooms": {
+        "trading": [
+          {
+            "skip": false,
+            "product": "LMD",
+            "operators": ["黑键", "吉星", "可露希尔"],
+            "sort": true,
+            "autofill": false
+          }
+        ],
+        "manufacture": [
+          {
+            "skip": false,
+            "product": "PureGold",
+            "operators": ["森蚺", "温蒂", "清流"],
+            "sort": true,
+            "autofill": false
+          },
+          {
+            "skip": false,
+            "product": "CombatRecord",
+            "operators": ["Lancet-2"],
+            "sort": false,
+            "autofill": true
+          }
+        ],
+        "power": [
+          {
+            "skip": false,
+            "operators": ["承曦格雷伊"],
+            "sort": false,
+            "autofill": false
+          }
+        ],
+        "dormitory": [
+          {
+            "skip": false,
+            "operators": [],
+            "sort": false,
+            "autofill": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "第二班",
+      "description": "6 小时短班",
+      "drones": "manufacture",
+      "rooms": {
+        "trading": [
+          {
+            "skip": false,
+            "product": "LMD",
+            "operators": ["空弦", "但书"],
+            "sort": true,
+            "autofill": false
+          }
+        ],
+        "manufacture": [
+          {
+            "skip": false,
+            "product": "PureGold",
+            "operators": ["槐琥", "阿罗玛", "砾"],
+            "sort": true,
+            "autofill": false
+          }
+        ],
+        "power": [
+          {
+            "skip": false,
+            "operators": ["缪尔赛思"],
+            "sort": false,
+            "autofill": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "第三班",
+      "rooms": {
+        "trading": [
+          {
+            "skip": false,
+            "product": "LMD",
+            "operators": ["野鬃", "远牙", "灰毫"],
+            "sort": true,
+            "autofill": false
+          }
+        ]
+      }
+    }
+  ]
+}

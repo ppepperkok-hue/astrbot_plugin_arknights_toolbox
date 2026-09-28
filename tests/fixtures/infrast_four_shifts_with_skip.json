@@ -1,0 +1,105 @@
+{
+  "_comment": "自撰 fixture，专为「四班表 + skip:true 条目」两种真实形态而写。结构同源，内容自撰，不是从任何 AGPL 项目复制的文件。",
+  "author": "toolbox-fixture",
+  "description": "四班制测试样本，含 skip:true 的房间条目（真实样本里 18/340 条如此）。",
+  "id": 1000000000000002,
+  "title": "测试用四班表（含 skip）",
+  "planTimes": "4班",
+  "scheduleType": {
+    "planTimes": 4,
+    "trading": 1,
+    "manufacture": 2,
+    "power": 1,
+    "dormitory": 1
+  },
+  "plans": [
+    {
+      "name": "1 7h",
+      "rooms": {
+        "trading": [
+          {
+            "skip": false,
+            "product": "LMD",
+            "operators": ["黑键", "吉星"],
+            "sort": true,
+            "autofill": false
+          }
+        ],
+        "power": [
+          {
+            "skip": false,
+            "operators": ["承曦格雷伊"],
+            "sort": false,
+            "autofill": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "2 5h",
+      "rooms": {
+        "trading": [
+          {
+            "skip": true,
+            "product": "LMD",
+            "operators": ["空弦", "黑键", "但书"],
+            "sort": true,
+            "autofill": false
+          }
+        ],
+        "manufacture": [
+          {
+            "skip": true,
+            "product": "PureGold",
+            "operators": ["清流", "温蒂", "森蚺"],
+            "sort": true,
+            "autofill": false
+          },
+          {
+            "skip": false,
+            "product": "PureGold",
+            "operators": ["槐琥", "阿罗玛", "砾"],
+            "sort": true,
+            "autofill": false
+          }
+        ],
+        "power": [
+          {
+            "skip": true,
+            "operators": ["缪尔赛思"],
+            "sort": false,
+            "autofill": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "3 7h",
+      "rooms": {
+        "trading": [
+          {
+            "skip": false,
+            "product": "LMD",
+            "operators": ["野鬃", "远牙"],
+            "sort": true,
+            "autofill": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "4 5h",
+      "rooms": {
+        "trading": [
+          {
+            "skip": false,
+            "product": "LMD",
+            "operators": ["灰毫"],
+            "sort": true,
+            "autofill": false
+          }
+        ]
+      }
+    }
+  ]
+}
