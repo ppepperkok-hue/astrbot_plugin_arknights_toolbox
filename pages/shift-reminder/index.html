@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>基建换班提醒</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <header class="head">
+        <h1>基建换班提醒</h1>
+        <button id="refresh" type="button">刷新</button>
+      </header>
+
+      <p id="status-line" class="muted">正在读取…</p>
+
+      <section class="cards">
+        <article class="card">
+          <h2>当前班次</h2>
+          <p id="current" class="big">—</p>
+        </article>
+        <article class="card">
+          <h2>下一班</h2>
+          <p id="upcoming" class="big">—</p>
+          <p id="upcoming-change" class="muted"></p>
+          <p id="countdown" class="countdown">—</p>
+        </article>
+      </section>
+
+      <section class="card">
+        <h2>绑定与推送</h2>
+        <dl class="kv">
+          <dt>提醒目标</dt>
+          <dd id="binding">—</dd>
+          <dt>提前量</dt>
+          <dd id="lead">—</dd>
+          <dt>推送状态</dt>
+          <dd id="breaker">—</dd>
+          <dt>排班表</dt>
+          <dd id="roster">—</dd>
+        </dl>
+        <p class="muted">
+          改班次时刻请到插件配置页；切换提醒目标请在 QQ 里发 <code>/ak bind</code>。
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>最近发送</h2>
+        <ul id="recent" class="recent">
+          <li class="muted">—</li>
+        </ul>
+      </section>
+
+      <p id="error" class="error" hidden></p>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

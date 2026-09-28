@@ -6,7 +6,7 @@
 （`core.registry.discover_modules`）必须 import 它才能找到 `Module` 子类。
 本机与 CI 都没有 AstrBot 运行时，所以这里用最小 stub 顶上。
 
-它**只补被 import 到的符号**（logger / MessageChain / 数据目录函数），
+它**只补被 import 到的符号**（logger / MessageChain / 数据目录函数 / Web API 助手），
 不模拟框架行为——被测的纯逻辑层依旧零框架依赖，注册表与基类也照旧不 import 框架。
 
 副作用仅限 `sys.modules`，不落任何文件。
@@ -15,6 +15,7 @@
 import sys
 import types
 from pathlib import Path
+from typing import Any
 
 
 def _install_astrbot_stub() -> None:
@@ -24,6 +25,7 @@ def _install_astrbot_stub() -> None:
     astrbot = types.ModuleType("astrbot")
     api = types.ModuleType("astrbot.api")
     event = types.ModuleType("astrbot.api.event")
+    web = types.ModuleType("astrbot.api.web")
     core = types.ModuleType("astrbot.core")
     utils = types.ModuleType("astrbot.core.utils")
     astrbot_path = types.ModuleType("astrbot.core.utils.astrbot_path")
@@ -46,17 +48,40 @@ def _install_astrbot_stub() -> None:
             self.parts.append(text)
             return self
 
+    class _StubQuery:
+        """够用的 query 代理：装配层只用 `get`。"""
+
+        def get(self, key: str, default: Any = None) -> Any:
+            return default
+
+    class _StubRequest:
+        """够用的 request 代理：只补被 import 到的 `query`。"""
+
+        query = _StubQuery()
+
     def get_astrbot_plugin_data_path() -> str:
         """默认给一个不会污染仓库的位置；需要时由测试 monkeypatch 覆盖。"""
         return str(Path.cwd() / ".pytest-plugin-data")
 
+    def json_response(payload: Any) -> Any:
+        """原样返回，便于测试直接断言 handler 组装出来的数据。"""
+        return payload
+
+    def error_response(message: str, status_code: int = 400) -> Any:
+        """与 json_response 同理：只保留可断言的信息，不模拟框架响应对象。"""
+        return {"error": message, "status_code": status_code}
+
     api.logger = _StubLogger()
     event.MessageChain = MessageChain
+    web.json_response = json_response
+    web.error_response = error_response
+    web.request = _StubRequest()
     astrbot_path.get_astrbot_plugin_data_path = get_astrbot_plugin_data_path
 
     astrbot.api = api
     astrbot.core = core
     api.event = event
+    api.web = web
     core.utils = utils
     utils.astrbot_path = astrbot_path
 
@@ -65,6 +90,7 @@ def _install_astrbot_stub() -> None:
             "astrbot": astrbot,
             "astrbot.api": api,
             "astrbot.api.event": event,
+            "astrbot.api.web": web,
             "astrbot.core": core,
             "astrbot.core.utils": utils,
             "astrbot.core.utils.astrbot_path": astrbot_path,

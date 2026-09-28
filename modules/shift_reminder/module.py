@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from astrbot.api import logger
 from astrbot.api.event import MessageChain
+from astrbot.api.web import error_response, json_response, request
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
 # 两种运行场景的导入差异：
@@ -27,13 +28,18 @@ try:  # pragma: no cover - 走哪支取决于运行场景，两支都是真实�
 except ImportError:  # pragma: no cover
     from ...core.module import Module
     from ...core.storage import JsonlSendLog, JsonStateStore, SendRecord
-from . import notify, scheduler
+from . import notify, scheduler, webapi
 from .schedule import ConfigError, Shift, ShiftTable, parse_hhmm, validate
 from .strategy import PeriodStrategy
 
 PLUGIN_NAME = "astrbot_plugin_arknights_toolbox"
 JOB_PREFIX = "ak_toolbox:shift_reminder:"
 UMO_KEY = "bound_umo"
+# 排班表导入状态（V1.5 才会写入）。页面据此显示「是否已导入」；尚未实现该功能时
+# 读到的永远是 None，因此必须是 `is not None` 判断，不能假设键一定存在。
+ROSTER_KEY = "imported_roster"
+# 页面后端路由前缀：按规范必须带插件名（docs/architecture/rules.md §5）。
+WEB_ROUTE_PREFIX = f"/{PLUGIN_NAME}/shift-reminder"
 DEFAULT_TIMEZONE = "Asia/Shanghai"
 TIMEZONE_KEY = "timezone"
 SHIFT_SLOTS = (1, 2, 3)
@@ -263,6 +269,10 @@ class ShiftReminderModule(Module):
             timezone,
         )
 
+        # 放在最后注册：前面任何一步失败都会让 initialize 抛出并被宿主回滚，
+        # 此时页面路由不该已经指向一个没初始化完的实例。
+        self._register_web_api(ctx)
+
     async def _purge_stale_jobs(self, cron_manager: Any) -> int:
         """删掉上一条进程遗留的定时任务，返回清掉的条数。
 
@@ -468,3 +478,62 @@ class ShiftReminderModule(Module):
             else "正常"
         )
         await self._reply(event, f"{body}\n绑定目标：{binding}\n推送状态：{breaker}")
+
+    # --- WebUI（页面只是另一种入口；数据一律复用上面的既有实现） -----------
+
+    def _register_web_api(self, ctx: Any) -> None:
+        """注册页面用的只读 Web API。
+
+        由**模块自己**注册，宿主不参与——宿主眼里只有「模块」，它不认识三班
+        （docs/architecture/scope.md §2）。`register_web_api` 对「同路由 + 同方法」
+        是替换语义，所以插件重载不会堆出重复路由。
+
+        取不到 `register_web_api` 时**只降级页面、不拖垮提醒**：换班提醒是核心功能，
+        不该因为一个可选页面让整个插件加载失败。但降级必须留痕——WARNING 写明后果，
+        不做成静默跳过（项目宪法 §2 第 2 条）。
+        """
+        register = getattr(ctx, "register_web_api", None)
+        if register is None:
+            logger.warning(
+                "[ak_toolbox][shift_reminder] 当前 Context 没有 register_web_api，"
+                "WebUI 页面将不可用；换班提醒本身不受影响。"
+            )
+            return
+        register(
+            f"{WEB_ROUTE_PREFIX}/status",
+            self._web_status,
+            ["GET"],
+            "基建换班提醒状态",
+        )
+
+    async def _web_status(self) -> Any:
+        """只读状态：当前班次、下一班倒计时、绑定目标、最近发送记录。
+
+        组装全在 `webapi.build_status`（纯逻辑、有单测）；这里只负责取数据，
+        绝不重算班次——两处逻辑必然漂移（docs/implementation/implementation.md §2.6）。
+        """
+        if self._strategy is None or self._store is None or self._send_log is None:
+            return error_response("换班提醒模块尚未初始化完成，请稍后重试", status_code=503)
+
+        raw_limit = request.query.get("limit", STATUS_RECENT)
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            logger.warning(
+                "[ak_toolbox][shift_reminder] 页面传入的 limit 不是整数：%r，改用默认值 %d",
+                raw_limit,
+                STATUS_RECENT,
+            )
+            limit = STATUS_RECENT
+        limit = max(1, min(limit, SEND_LOG_KEEP))
+
+        payload = webapi.build_status(
+            self._strategy.snapshot(self._now()),
+            lead_minutes=self._lead_minutes,
+            bound=self._get_target() is not None,
+            recent=self._send_log.recent(limit),
+            roster_imported=self._store.get(ROSTER_KEY) is not None,
+            breaker_open=self._breaker.is_open,
+            consecutive_failures=self._breaker.consecutive_failures,
+        )
+        return json_response(payload)

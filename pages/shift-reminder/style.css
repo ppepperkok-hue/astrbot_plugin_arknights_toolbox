@@ -1,0 +1,152 @@
+/* 基建换班提醒 —— 只读状态页。
+   样式克制、跟随系统深浅色；刻意不引任何外部 CDN（离线环境也能用）。 */
+
+:root {
+  color-scheme: light dark;
+  --fg: #1f2328;
+  --muted: #6b7280;
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --line: #e3e6ea;
+  --bad: #b42318;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e6e8eb;
+    --muted: #9aa1ab;
+    --bg: #16181c;
+    --card: #1f2227;
+    --line: #2c3037;
+    --bad: #ff8a80;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 20px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.wrap {
+  max-width: 760px;
+  margin: 0 auto;
+  display: grid;
+  gap: 16px;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+h1 {
+  font-size: 20px;
+  margin: 0;
+}
+
+h2 {
+  font-size: 13px;
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+button {
+  font: inherit;
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.cards {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.big {
+  font-size: 17px;
+  margin: 0 0 6px;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0;
+}
+
+.countdown {
+  margin: 8px 0 0;
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: 5.5em 1fr;
+  gap: 6px 12px;
+  margin: 0 0 10px;
+}
+
+.kv dt {
+  color: var(--muted);
+}
+
+.kv dd {
+  margin: 0;
+}
+
+.recent {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.recent .bad {
+  color: var(--bad);
+}
+
+.error {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(180, 35, 24, 0.12);
+  color: var(--bad);
+  font-size: 13px;
+}
+
+code {
+  background: rgba(127, 127, 127, 0.16);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
