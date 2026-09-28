@@ -1,0 +1,5 @@
+# Runtime dependencies: intentionally EMPTY.
+#
+# This plugin uses only the Python standard library plus the `astrbot` package
+# that the host provides. Keeping this file empty is a deliberate decision, not
+# an oversight — see docs/tech-stack.md §7 and §10.

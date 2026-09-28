@@ -1,0 +1,6 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+python_files = ["test_*.py"]
+# 让测试可以直接 import modules.*（纯逻辑层不依赖 AstrBot）
+pythonpath = ["."]

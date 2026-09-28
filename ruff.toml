@@ -1,0 +1,39 @@
+line-length = 100
+target-version = "py312"
+
+[lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+    "TID", # flake8-tidy-imports
+]
+ignore = ["E501"] # line length is the formatter's job
+
+[lint.flake8-tidy-imports]
+# 允许同包内相对导入（modules/x/a.py -> modules/x/b.py），禁止向上越级。
+ban-relative-imports = "parents"
+
+# 架构红线（见 docs/architecture/rules.md §2、§3）：
+# 纯逻辑层不得依赖 AstrBot 框架，也不得改用标准库 logging。
+# 需要框架的文件在下面的 per-file-ignores 里单独放行。
+[lint.flake8-tidy-imports.banned-api]
+"astrbot".msg = "纯逻辑层禁止依赖 AstrBot；框架调用请留在 main.py / core/module.py / */module.py。"
+"logging".msg = "请使用 AstrBot 提供的 logger（from astrbot.api import logger）。"
+
+[lint.per-file-ignores]
+# 这三类文件是"框架胶水层"，允许 import astrbot（但仍禁止 logging）
+"main.py" = ["TID"]
+"core/module.py" = ["TID"]
+"core/registry.py" = ["TID"]
+"core/storage.py" = ["TID"]
+"modules/*/module.py" = ["TID"]
+"tests/*" = ["TID", "SIM"]
+
+[lint.isort]
+known-first-party = ["core", "modules"]

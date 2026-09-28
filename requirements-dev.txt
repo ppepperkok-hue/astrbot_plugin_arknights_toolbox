@@ -1,0 +1,5 @@
+# Development-only dependencies (never installed with the plugin).
+# Versions are pinned so that local runs and CI agree.
+ruff>=0.9,<0.15
+pytest>=8.0
+pytest-cov>=6.0
