@@ -27,10 +27,10 @@ ban-relative-imports = "parents"
 "logging".msg = "请使用 AstrBot 提供的 logger（from astrbot.api import logger）。"
 
 [lint.per-file-ignores]
-# 这三类文件是"框架胶水层"，允许 import astrbot（但仍禁止 logging）
+# 框架胶水层允许 import astrbot（但仍禁止 logging）。
+# 注意：core/module.py 与 core/registry.py **不在此列**——它们刻意零框架依赖，
+# 提前开例外等于给自己留后门（独立审查意见）。真需要时再加。
 "main.py" = ["TID"]
-"core/module.py" = ["TID"]
-"core/registry.py" = ["TID"]
 "core/storage.py" = ["TID"]
 "modules/*/module.py" = ["TID"]
 "tests/*" = ["TID", "SIM"]

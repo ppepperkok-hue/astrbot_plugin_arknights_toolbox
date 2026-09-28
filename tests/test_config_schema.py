@@ -97,7 +97,12 @@ def test_schema_drops_the_old_nested_shifts_section(schema: dict[str, Any]) -> N
 
 
 def test_schema_has_no_modules_section_yet(schema: dict[str, Any]) -> None:
-    """`modules` 开关段留到 S3 装配模块时再加：现在加会让注册表因未知模块名抛错。"""
+    """`modules` 开关段留到 S3 装配模块时再加（裁决 D2）。
+
+    理由是「S1 还没有可开的模块」，**不是**"加了会让注册表因未知模块名抛错"——
+    已核实 `_config_schema_to_default_config` 对 `object` 忽略顶层 `default`、
+    只用 `items` 递归生成，空 `items` 只会生成 `{}`，不会凭空造出模块名。
+    """
     assert "modules" not in schema
 
 
@@ -170,7 +175,12 @@ def test_every_declared_field_has_type_description_and_hint(schema: dict[str, An
 
 
 def test_metadata_declares_name_and_astrbot_version() -> None:
-    """`astrbot_version` 是硬要求：版本不满足时 AstrBot 会拒绝加载而不是静默出错。"""
+    """`astrbot_version` 是必填元数据。
+
+    已核实该 specifier 只在**安装 / 更新**路径被校验
+    （`core/star/star_manager.py:671` `_validate_astrbot_version_specifier`，
+    调用点 `:2086`），**加载路径不校验**；写错会显式报错而不是静默放行。
+    """
     if not METADATA_PATH.is_file():
         pytest.fail(f"缺少元数据文件：{METADATA_PATH}")
 
@@ -178,3 +188,18 @@ def test_metadata_declares_name_and_astrbot_version() -> None:
     assert "name: astrbot_plugin_arknights_toolbox" in text
     assert 'astrbot_version: ">=4.17.0"' in text
     assert "version: 0.1.0" in text
+
+
+def test_metadata_declares_version_exactly_once() -> None:
+    """子串断言挡不住"文件后面又冒出一行 version: 9.9.9"，所以数出现次数。"""
+    if not METADATA_PATH.is_file():
+        pytest.fail(f"缺少元数据文件：{METADATA_PATH}")
+
+    version_lines = [
+        line.strip()
+        for line in METADATA_PATH.read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("version:")
+    ]
+    assert version_lines == ["version: 0.1.0"], (
+        f"version: 应恰好出现一次且为 0.1.0，实际为 {version_lines}"
+    )
