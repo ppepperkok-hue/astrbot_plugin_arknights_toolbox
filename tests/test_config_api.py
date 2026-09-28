@@ -80,7 +80,9 @@ def _toolbox(config, payload):
     async def fake_json(default=None):
         return payload if payload is not None else default
 
-    plugin_main.request = SimpleNamespace(json=fake_json, query=SimpleNamespace(get=lambda *a, **k: None))
+    plugin_main.request = SimpleNamespace(
+        json=fake_json, query=SimpleNamespace(get=lambda *a, **k: None)
+    )
     return plugin
 
 
@@ -126,7 +128,9 @@ def test_reports_unsupported_when_config_cannot_save() -> None:
     async def fake_json(default=None):
         return {"shift_reminder": {}}
 
-    plugin_main.request = SimpleNamespace(json=fake_json, query=SimpleNamespace(get=lambda *a, **k: None))
+    plugin_main.request = SimpleNamespace(
+        json=fake_json, query=SimpleNamespace(get=lambda *a, **k: None)
+    )
     result = asyncio.run(plugin._web_save_config())
 
     assert result["status_code"] == 501
