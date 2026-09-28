@@ -5,7 +5,7 @@
 调度辅助在 `scheduler`。这里只负责把它们接起来。
 """
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -76,6 +76,30 @@ def parse_lead_minutes(config: Mapping[str, Any]) -> int:
     return raw
 
 
+def stale_job_ids(jobs: Iterable[Any], prefix: str = JOB_PREFIX) -> list[str]:
+    """挑出**属于本模块**、（可能）是上一条进程遗留的 job id。
+
+    只认名字前缀，别的一律不碰：AstrBot 的 cron 表是所有插件共用的，
+    过滤条件放宽一点就可能删掉用户其它功能的定时任务。
+
+    Args:
+        jobs: `cron_manager.list_jobs()` 的返回值（任何带 `name` / `job_id` 的对象）。
+        prefix: 本模块的 job 名前缀。
+
+    Returns:
+        待清理的 job id 列表；没有匹配项时返回空列表。
+    """
+    stale: list[str] = []
+    for job in jobs:
+        name = getattr(job, "name", "")
+        if not isinstance(name, str) or not name.startswith(prefix):
+            continue
+        job_id = getattr(job, "job_id", None)
+        if job_id:
+            stale.append(str(job_id))
+    return stale
+
+
 class ShiftReminderModule(Module):
     """三班制换班提醒。"""
 
@@ -112,6 +136,14 @@ class ShiftReminderModule(Module):
         self._strategy = PeriodStrategy(table, lead_minutes)
         self._store = JsonStateStore(data_dir / "state.json")
         self._send_log = JsonlSendLog(data_dir / "sends.jsonl", keep=SEND_LOG_KEEP)
+        self._job_ids = []
+
+        purged = await self._purge_stale_jobs(cron_manager)
+        logger.info(
+            "[ak_toolbox][shift_reminder] 已清理 %d 个历史任务，开始注册 %d 个换班提醒任务",
+            purged,
+            len(table.shifts),
+        )
 
         for shift in table.shifts:
             job = await cron_manager.add_basic_job(
@@ -129,6 +161,28 @@ class ShiftReminderModule(Module):
             len(self._job_ids),
             lead_minutes,
         )
+
+    async def _purge_stale_jobs(self, cron_manager: Any) -> int:
+        """删掉上一条进程遗留的定时任务，返回清掉的条数。
+
+        AstrBot 被 kill（容器重启、OOM）时 ``terminate()`` 来不及跑，上一轮注册的
+        job 会留在 cron 表里；不先清掉，每重启一次就多三条，到点触发三次。
+        幂等：没有历史任务时安静返回 0。
+
+        清理失败一律向上抛——宁可不启动，也不要在明知有重复任务的情况下继续注册
+        更多（项目宪法 §2 第 2、4 条）。宿主会回滚已启动的模块，不会留下半个插件。
+        """
+        stale: list[str] = []
+        try:
+            stale = stale_job_ids(await cron_manager.list_jobs())
+            for job_id in stale:
+                await cron_manager.delete_job(job_id)
+        except Exception:
+            logger.exception(
+                "[ak_toolbox][shift_reminder] 清理历史定时任务失败，中止启动以免重复注册"
+            )
+            raise
+        return len(stale)
 
     async def terminate(self) -> None:
         """按前缀清掉自己注册的定时任务；可安全重复调用。"""

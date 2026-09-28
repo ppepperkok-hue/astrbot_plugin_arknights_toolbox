@@ -1,0 +1,196 @@
+"""换班提醒的定时任务清理：只删自己的，且失败要响。
+
+这是**删除操作**前的最后一关。AstrBot 的 cron 表由所有插件共用，
+过滤条件一旦放宽，就会删掉用户别的功能的定时任务——所以这里重点盯
+「只认自己的前缀」，以及「清理失败必须抛出、不许照常再注册一批」。
+"""
+
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+
+from modules.shift_reminder import module as reminder_module
+from modules.shift_reminder.module import JOB_PREFIX, ShiftReminderModule, stale_job_ids
+
+
+def job(name, job_id):
+    """够用的假 job：真实对象只需要 `name` 与 `job_id` 两个属性。"""
+    return SimpleNamespace(name=name, job_id=job_id)
+
+
+class FakeCronManager:
+    """只实现本模块用到的那三个方法，不模拟 AstrBot 的任何其它行为。"""
+
+    def __init__(self, jobs=(), fail_list=False, fail_delete=False):
+        self._jobs = list(jobs)
+        self.deleted = []
+        self.added = []
+        self.fail_list = fail_list
+        self.fail_delete = fail_delete
+
+    async def list_jobs(self):
+        if self.fail_list:
+            raise RuntimeError("list_jobs 炸了")
+        return list(self._jobs)
+
+    async def delete_job(self, job_id):
+        if self.fail_delete:
+            raise RuntimeError("delete_job 炸了")
+        self.deleted.append(job_id)
+        self._jobs = [j for j in self._jobs if j.job_id != job_id]
+
+    async def add_basic_job(self, **kwargs):
+        new = job(kwargs["name"], f"new-{len(self.added) + 1}")
+        self.added.append(kwargs["name"])
+        self._jobs.append(new)
+        return new
+
+
+CONFIG = {
+    "shift_1_name": "早班",
+    "shift_1_start": "08:00",
+    "shift_1_hours": 12,
+    "shift_2_name": "晚班",
+    "shift_2_start": "20:00",
+    "shift_2_hours": 6,
+    "shift_3_name": "夜班",
+    "shift_3_start": "02:00",
+    "shift_3_hours": 6,
+    "lead_minutes": 10,
+}
+
+
+# --- 纯选择器 ---------------------------------------------------------------
+
+
+def test_picks_only_our_prefixed_jobs():
+    jobs = [
+        job(f"{JOB_PREFIX}早班", "id-1"),
+        job(f"{JOB_PREFIX}晚班", "id-2"),
+        job(f"{JOB_PREFIX}夜班", "id-3"),
+    ]
+    assert stale_job_ids(jobs) == ["id-1", "id-2", "id-3"]
+
+
+def test_never_touches_other_plugins_jobs():
+    jobs = [
+        job("astrbot_plugin_angel_heart:daily", "other-1"),
+        job("ak_toolbox:maa:link_start", "other-2"),
+        job("daily_sharing:morning", "other-3"),
+        job(f"{JOB_PREFIX}早班", "mine-1"),
+    ]
+    assert stale_job_ids(jobs) == ["mine-1"]
+
+
+def test_prefix_must_be_at_the_start():
+    """名字中间出现前缀不算——否则别人的 job 会被误删。"""
+    jobs = [job(f"other:{JOB_PREFIX}早班", "other-1")]
+    assert stale_job_ids(jobs) == []
+
+
+def test_empty_input():
+    assert stale_job_ids([]) == []
+
+
+def test_skips_jobs_without_usable_name_or_id():
+    jobs = [
+        job(None, "no-name"),
+        job("", "empty-name"),
+        job(123, "int-name"),
+        job(f"{JOB_PREFIX}早班", ""),
+        job(f"{JOB_PREFIX}晚班", None),
+        job(f"{JOB_PREFIX}夜班", "mine-1"),
+    ]
+    assert stale_job_ids(jobs) == ["mine-1"]
+
+
+def test_id_is_coerced_to_str():
+    assert stale_job_ids([job(f"{JOB_PREFIX}早班", 42)]) == ["42"]
+
+
+def test_custom_prefix_is_honoured():
+    jobs = [job("custom:early", "c-1"), job(f"{JOB_PREFIX}早班", "d-1")]
+    assert stale_job_ids(jobs, prefix="custom:") == ["c-1"]
+
+
+def test_repeated_calls_are_stable():
+    jobs = [job(f"{JOB_PREFIX}早班", "id-1"), job("other", "x")]
+    assert stale_job_ids(jobs) == stale_job_ids(jobs) == ["id-1"]
+
+
+# --- 清理动作 ---------------------------------------------------------------
+
+
+def test_purge_deletes_our_jobs_only_and_returns_count():
+    fake = FakeCronManager(
+        [
+            job(f"{JOB_PREFIX}早班", "mine-1"),
+            job("other_plugin:job", "other-1"),
+        ]
+    )
+    purged = asyncio.run(ShiftReminderModule()._purge_stale_jobs(fake))
+
+    assert purged == 1
+    assert fake.deleted == ["mine-1"]
+    assert [j.job_id for j in fake._jobs] == ["other-1"]
+
+
+def test_purge_is_idempotent_when_nothing_left():
+    fake = FakeCronManager([])
+    module = ShiftReminderModule()
+
+    assert asyncio.run(module._purge_stale_jobs(fake)) == 0
+    assert asyncio.run(module._purge_stale_jobs(fake)) == 0
+    assert fake.deleted == []
+
+
+def test_purge_failure_is_loud():
+    """清理失败必须抛出来，不能吞掉后照常再注册一批。"""
+    module = ShiftReminderModule()
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(module._purge_stale_jobs(FakeCronManager(fail_list=True)))
+
+    leftover = FakeCronManager([job(f"{JOB_PREFIX}早班", "mine-1")], fail_delete=True)
+    with pytest.raises(RuntimeError):
+        asyncio.run(module._purge_stale_jobs(leftover))
+
+
+def test_initialize_purges_previous_run_before_registering(monkeypatch, tmp_path):
+    """重载/重启后不该留下上一轮的任务：先清干净，再注册新的三条。
+
+    顺序是这条修复的命门——若先注册后清理，那一轮新注册的 job 也会被自己删掉，
+    断言的 `_jobs == _job_ids` 会直接失败。
+    """
+    monkeypatch.setattr(reminder_module, "get_astrbot_plugin_data_path", lambda: str(tmp_path))
+
+    fake = FakeCronManager(
+        [
+            job(f"{JOB_PREFIX}早班", "old-1"),
+            job(f"{JOB_PREFIX}晚班", "old-2"),
+            job(f"{JOB_PREFIX}夜班", "old-3"),
+            job("other_plugin:keep-me", "other-1"),
+        ]
+    )
+    module = ShiftReminderModule()
+    module._job_ids = ["left-over-from-previous-run"]
+
+    asyncio.run(module.initialize(SimpleNamespace(cron_manager=fake), CONFIG))
+
+    assert fake.deleted == ["old-1", "old-2", "old-3"]
+    assert len(module._job_ids) == 3
+    assert sorted(fake.added) == sorted(f"{JOB_PREFIX}{name}" for name in ("早班", "晚班", "夜班"))
+    # 表里恰好只剩「别人的」+「本轮新注册的」
+    assert [j.job_id for j in fake._jobs] == ["other-1", *module._job_ids]
+
+
+def test_initialize_refuses_to_start_when_purge_fails(monkeypatch, tmp_path):
+    """清理不了就不许注册：否则会把重复任务越堆越多。"""
+    monkeypatch.setattr(reminder_module, "get_astrbot_plugin_data_path", lambda: str(tmp_path))
+
+    fake = FakeCronManager([job(f"{JOB_PREFIX}早班", "old-1")], fail_delete=True)
+    with pytest.raises(RuntimeError):
+        asyncio.run(ShiftReminderModule().initialize(SimpleNamespace(cron_manager=fake), CONFIG))
+
+    assert fake.added == []
