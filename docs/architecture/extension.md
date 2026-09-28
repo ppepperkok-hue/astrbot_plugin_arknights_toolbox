@@ -16,24 +16,26 @@
 | 7 | 跑验证命令 | 全绿 |
 | 8 | 更新 README 的模块表 | 文档 |
 
-## 2. 模块基类契约（S1 插槽，冻结）
+## 2. 模块基类契约（冻结；2026-09-29 第二次修订）
 
 ```python
 class Module(ABC):
-    name: str                      # 模块 id，等于目录名，等于配置开关名
-    config_key: str                # _conf_schema.json 里的配置键
+    name: str        # 模块 id，等于目录名，等于配置开关名
+    config_key: str  # _conf_schema.json 里该模块参数段的键
 
     @abstractmethod
-    async def initialize(self, ctx) -> None: ...
+    async def initialize(self, ctx, config: Mapping[str, Any]) -> None: ...
     @abstractmethod
     async def terminate(self) -> None: ...
-    def commands(self) -> list:    # 可选：模块自己注册的指令
-        return []
-    def jobs(self) -> list:        # 可选：模块自己注册的定时任务
-        return []
+
+    async def handle_command(self, command: str, event) -> bool:
+        """处理 /ak <command>；未处理返回 False。"""
+        return False
 ```
 
-**契约不变项**：任何模块都不许从 `main.py` 取值、不许 import 别的模块、不许自己起调度循环（定时一律走 `context.cron_manager.add_basic_job`）。
+**修订说明（为什么删掉 `commands()` / `jobs()`）**：AstrBot 的指令是用装饰器在**插件类**上静态注册的，模块无法自行注册指令——那两个方法是天生的死接口（全仓无调用点）。改为「宿主统一注册 `/ak`，逐模块转发 `handle_command`」；定时任务由模块在 `initialize()` 里自己用 `ctx.cron_manager.add_basic_job` 注册，并在 `terminate()` 里按 `ak_toolbox:<name>:` 前缀清理，不需要基类代为聚合。
+
+**契约不变项**：任何模块都不许从 `main.py` 取值、不许 import 别的模块、不许自己起调度循环（定时一律走 `context.cron_manager.add_basic_job`）；`config` 是**本模块自己那一段**，模块不得看到整份插件配置。
 
 ## 3. 接入检查单
 

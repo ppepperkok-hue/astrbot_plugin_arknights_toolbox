@@ -63,7 +63,7 @@
 | --- | --- | --- |
 | 生命周期 | 用 `initialize()` / `terminate()` | 官方钩子；`context.register_task` 在 4.28.1 **已弃用** |
 | 定时 | `context.cron_manager.add_basic_job()` | 落库 + 重启 `sync_from_db` 自恢复；**不用** `add_active_job`（会唤醒主 Agent 耗 LLM） |
-| 版本兼容 | `getattr(self.context, "cron_manager", None)`，取不到退自建 APScheduler | `cron_manager` 自 4.17 起才有；同时 `metadata.yaml` 声明 `astrbot_version: ">=4.17.0"` |
+| 版本兼容 | `getattr(self.context, "cron_manager", None)`，取不到时**抛明确错误**，不静默降级——维护两套调度不值当；版本需求已由 `astrbot_version` 限定 | `cron_manager` 自 4.17 起才有；同时 `metadata.yaml` 声明 `astrbot_version: ">=4.17.0"` |
 | 主动推送 | `await self.context.send_message(umo, chain)`，**必须检查返回值** | 找不到平台时只返回 `False` + warning，不抛异常，不检查就会静默漏提醒 |
 | 状态清理 | `terminate()` 里按 job 名前缀 `delete_job` + 取消后台任务 | 框架只在插件**定义了 `terminate()`** 时才 await 它 |
 | 模块宿主 | `core/module.py` 定义模块基类，`core/registry.py` 装载 | 定位修订 04 的架构要求：加模块不改老代码 |
