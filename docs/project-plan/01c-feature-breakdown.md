@@ -1,5 +1,9 @@
 # 立项 · 第 3 步：功能细化拆解
 
+> ⚠️ **本文 §1–§4 已被 [04-positioning-revision.md](04-positioning-revision.md) 取代。**
+> 原因：项目定位由「换班提醒插件」修正为「**明日方舟能力工具箱**」，功能清单随之升级为**模块清单**。
+> 本文 §4.3 灰区判定仍然有效。
+
 > 需求定义第 3 层：**定义范围**——做什么、不做什么。
 > 上游输入：[00-market-scan.md](00-market-scan.md)、[01a-core-value.md](01a-core-value.md)、[01b-project-goals.md](01b-project-goals.md)
 > 时间：2026-09-29 ／ 状态：**待用户确认** ／ 本版为 **v0.2（形态变更为 AstrBot 插件）**
