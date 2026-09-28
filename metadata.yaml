@@ -1,0 +1,8 @@
+name: astrbot_plugin_arknights_toolbox
+display_name: 明日方舟工具箱
+desc: "把明日方舟的日常收进一个插件：基建换班提醒、森空岛状态、MAA 触发……每个功能都是可单独开关的模块，加新模块不影响已有模块。"
+short_desc: 明日方舟能力工具箱，第一个模块是基建换班提醒
+version: 0.1.0
+author: ppepperkok-hue
+repo: https://github.com/ppepperkok-hue/astrbot_plugin_arknights_toolbox
+astrbot_version: ">=4.17.0"

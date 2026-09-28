@@ -1,0 +1,81 @@
+{
+  "shift_reminder": {
+    "type": "object",
+    "description": "基建换班提醒模块",
+    "hint": "三段时长必须正好合计 24 小时、并且首尾相接（上一班的结束时刻 = 下一班的开始时刻），否则插件会拒绝注册定时任务并明确指出哪里不连续。班次名称随你习惯叫。",
+    "default": {
+      "shift_1_name": "早班",
+      "shift_1_start": "08:00",
+      "shift_1_hours": 12,
+      "shift_2_name": "晚班",
+      "shift_2_start": "20:00",
+      "shift_2_hours": 6,
+      "shift_3_name": "夜班",
+      "shift_3_start": "02:00",
+      "shift_3_hours": 6,
+      "lead_minutes": 10
+    },
+    "items": {
+      "shift_1_name": {
+        "type": "string",
+        "description": "第一班名称",
+        "hint": "提醒消息里显示的名字，例如「早班」。",
+        "default": "早班"
+      },
+      "shift_1_start": {
+        "type": "string",
+        "description": "第一班开始时刻",
+        "hint": "24 小时制 HH:MM，例如 08:00。",
+        "default": "08:00"
+      },
+      "shift_1_hours": {
+        "type": "int",
+        "description": "第一班时长（小时）",
+        "hint": "这一班持续多少小时，例如 12。",
+        "default": 12
+      },
+      "shift_2_name": {
+        "type": "string",
+        "description": "第二班名称",
+        "hint": "提醒消息里显示的名字，例如「晚班」。",
+        "default": "晚班"
+      },
+      "shift_2_start": {
+        "type": "string",
+        "description": "第二班开始时刻",
+        "hint": "24 小时制 HH:MM，例如 20:00。",
+        "default": "20:00"
+      },
+      "shift_2_hours": {
+        "type": "int",
+        "description": "第二班时长（小时）",
+        "hint": "这一班持续多少小时，例如 6。",
+        "default": 6
+      },
+      "shift_3_name": {
+        "type": "string",
+        "description": "第三班名称",
+        "hint": "提醒消息里显示的名字，例如「夜班」。",
+        "default": "夜班"
+      },
+      "shift_3_start": {
+        "type": "string",
+        "description": "第三班开始时刻",
+        "hint": "24 小时制 HH:MM，例如 02:00。跨天写真实时刻即可，不需要写 26:00。",
+        "default": "02:00"
+      },
+      "shift_3_hours": {
+        "type": "int",
+        "description": "第三班时长（小时）",
+        "hint": "这一班持续多少小时，例如 6。",
+        "default": 6
+      },
+      "lead_minutes": {
+        "type": "int",
+        "description": "提前量（分钟）",
+        "hint": "换班时刻提前多久推送提醒。默认 10 分钟，够从手头的事里抽身开游戏。",
+        "default": 10
+      }
+    }
+  }
+}
