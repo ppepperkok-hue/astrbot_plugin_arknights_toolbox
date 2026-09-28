@@ -2,7 +2,7 @@
 
 > 把我的明日方舟日常收进一个 AstrBot 插件。
 
-**当前状态：立项阶段（Phase 0）**，尚未开始写实现代码。
+**当前状态：Phase 1 开发中** —— 宿主骨架与纯逻辑层已落地，正在实现「基建换班提醒」模块（S1–S6）。**尚未部署，也还没有可用的提醒功能。**
 
 ## 这是什么
 
@@ -45,6 +45,16 @@
 - 目标运行环境：AstrBot **4.28.1**
 - 插件开发指南：[官方文档 · 从这里开始](https://docs.astrbot.app/dev/star/plugin-new.html)
 - 命名约定：`astrbot_plugin_` 前缀 + 全小写 + 无空格
+
+## 本地验证
+
+改完必须跑这一条，四段全绿才算完成：
+
+```bash
+python scripts/verify_constitution.py && ruff check . && ruff format --check . && pytest -q
+```
+
+CI（[.github/workflows/ci.yml](.github/workflows/ci.yml)）跑的是同一套命令，本地过了 CI 才会过。
 
 ## 许可证
 

@@ -24,12 +24,49 @@
 
 | 步骤 | 做什么 | 做到什么程度 | 验收标准 | 验证方式 | 暂时不做什么 |
 | --- | --- | --- | --- | --- | --- |
-| S1.1 | `metadata.yaml` + `_conf_schema.json` | 元数据含 `astrbot_version: ">=4.17.0"`；配置含模块开关、三班、提前量、默认值 | 文件存在且被 AstrBot 接受 | 服务器加载插件 | 不做 Pages 相关字段 |
+| S1.1 | `metadata.yaml` + `_conf_schema.json` | 元数据含 `astrbot_version: ">=4.17.0"`；配置含**三班 + 提前量**（**模块开关按 D1 形式在 S3 加入**，见下方裁决表） | 文件存在且被 AstrBot 接受；默认三班能通过 `validate` | 服务器加载插件 + 单测 | 不做 Pages 相关字段；**本阶段不放 `modules` 段** |
 | S1.2 | `core/module.py` 模块基类 | 冻结 `name`/`config_key`/`initialize`/`terminate`/`commands`/`jobs` 签名 | 基类可被继承；契约与 [extension.md](../architecture/extension.md) §2 一致 | 单测（假模块继承）+ review | 不写任何具体模块逻辑 |
 | S1.3 | `core/registry.py` 注册表 | 按配置开关装载模块；未知模块名报错 | 给未知模块名 → 明确报错，不静默跳过 | 单测 | 不做插件间调用 |
 | S1.4 | `main.py` 入口 | 读配置 → 建注册表 → `initialize()` → 注册 `/ak` 指令；`terminate()` 全清 | 服务器上加载后有日志、无异常 | 服务器加载 + 日志 | 不做 Web API |
 
 **本子阶段结束时**：插件能在服务器上加载，`/ak` 指令能回一句"还没实现功能"。
+
+### S1 配置结构裁决（D1–D5）
+
+> 由 S1B 发现的并行包集成冲突触发，2026-09-29 裁定。**本表是配置结构的唯一事实**（原先只在 `plan.md`，现搬入 SSOT）。
+
+| # | 决定 | 理由 |
+| --- | --- | --- |
+| D1 | **模块开关放 `modules.<模块名>`，模块参数放以模块名命名的段，嵌套不超过两层** | 将来加 `skland` / `maa` 时能区分「模块开关」与「模块参数」；官方文档称 `object`「理论上无限嵌套，但不建议过多嵌套」 |
+| D2 | **S1 阶段不放 `modules` 段** | 当前无任何模块实现、`_KNOWN_MODULES` 为空，该段存在与否都无意义。**（修正：原先写「该段存在会抛 `UnknownModuleError`」，经核实不成立——`_config_schema_to_default_config` 对 `object` 忽略顶层 `default`，只用 `items` 递归生成）** |
+| D3 | 模块开关默认值在 **S3** 落定时设为 `true` | S1 没有可开的模块，默认值无意义 |
+| D4 | **保留**「未知模块名无论开关真假都抛错」 | 显式失败优于静默跳过（宪法 §2 第 2 条） |
+| D5 | 三班用固定 `object` 段，**不用 `template_list`** | `template_list` 允许任意班次数，属提前造扩展点（宪法 §5 第 4 条） |
+
+### 已核实的框架事实（本机 AstrBot 4.28.1 源码）
+
+| 事实 | 出处 | 影响 |
+| --- | --- | --- |
+| `initialize()` 失败时框架**不会**调用 `terminate()` | `core/star/star_manager.py:1421/1436/1452`；`terminate()` 仅见于 `:1963` 停用/重载路径 | 宿主必须自行回滚已启动的模块 |
+| schema 未声明的配置键会被**删除** | `core/config/astrbot_config.py:172` `check_config_integrity`；`:245` 打印 `Config key removed` | `modules` 段在 S1 写进去也会被抹掉 |
+
+### 模块如何取得自己的配置（C3 裁决）
+
+**决定：`initialize(self, ctx, config)`——宿主把「该模块自己那一段」显式传入。**
+
+```python
+async def initialize(self, ctx: Any, config: Mapping[str, Any]) -> None: ...
+```
+
+理由：① 显式传参，不给 `Module` 加可变状态；② 模块只看到自己那段（`config[module.config_key]`），**不知道别的模块段存在**；③ 假模块在测试里直接收 dict 即可。宿主侧 `start_all(ctx, config)` 按 `config_key` 取段后传入。
+
+### S5 硬性完成判据
+
+**S5 在任何子命令落地之前必须先有指令权限过滤**——`/ak status` 会输出排班与绑定目标，`/ak bind` 会改掉推送目标。默认开放一旦成为事实标准就难收回。这是完成判据，不是待办。
+
+### 待 S3/S4 明确
+
+`core/module.py` 的 `commands()` / `jobs()` 目前无调用点。**S3/S4 必须明确谁聚合它们**（宿主统一注册 vs 模块自注册），否则 S4 的「按前缀清理定时任务」没有落点。
 
 ### S2 纯逻辑层 —— 已完成（2026-09-29）
 

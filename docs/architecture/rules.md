@@ -38,7 +38,7 @@
 | 规则 | 内容 | 检查手段 |
 | --- | --- | --- |
 | 配置声明 | 所有开关与参数写在 `_conf_schema.json`，**不在代码里硬编码可调值** | review + 单测读默认值 |
-| 默认值 | 三班默认 `08:00 / 20:00 / 02:00`、提前量 10 分钟、模块默认关（除 shift_reminder） | 单测断言默认配置可解析 |
+| 默认值 | 三班默认 `08:00 / 20:00 / 02:00`、提前量 10 分钟；**模块开关的默认值在 S3 装配模块时才落定**（裁决 D3，见 [implementation.md](../implementation/implementation.md)） | 单测断言默认配置可解析 |
 | 时区 | 固定 `Asia/Shanghai`，可配置但不默认跟随宿主 | 单测 |
 | 密钥 | V1 无凭据。V2 的 cred/token 只落 `plugin_data/`，**不进日志、不进仓库** | `.gitignore` 覆盖 + review |
 | 数据位置 | 一律 `plugin_data/<plugin_name>/`，**禁止写插件自身目录** | review（官方硬约束） |
@@ -47,7 +47,7 @@
 
 | 规则 | 内容 | 检查手段 |
 | --- | --- | --- |
-| 模块基类 | `core/module.py` 冻结：`name` / `config_schema` / `initialize` / `terminate` / `commands` / `jobs` | 新增模块必须通过基类校验 |
+| 模块基类 | `core/module.py` 冻结：`name` / `config_key` / `initialize(ctx, config)` / `terminate` / `commands` / `jobs`。**C3 裁决**：`config` 是**该模块自己那一段**配置，由宿主按 `config_key` 取出后传入——模块不得看到整份插件配置 | 新增模块必须通过基类校验 |
 | 判定策略 | `Strategy.judge(now) -> Decision`；V1 只有周期策略 | 单测（固定时间点断言判定结果） |
 | 定时任务 | 统一走 `context.cron_manager.add_basic_job`，job 名前缀 `ak_toolbox:` | 单测断言 job 名；`terminate` 按前缀清理 |
 | 指令前缀 | 统一 `/ak <子命令>`（如 `/ak status`、`/ak test`） | review |
