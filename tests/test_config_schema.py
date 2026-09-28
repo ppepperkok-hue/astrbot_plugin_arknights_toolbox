@@ -11,6 +11,7 @@
 """
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -190,11 +191,15 @@ def test_metadata_declares_name_and_astrbot_version() -> None:
     text = METADATA_PATH.read_text(encoding="utf-8")
     assert "name: astrbot_plugin_arknights_toolbox" in text
     assert 'astrbot_version: ">=4.17.0"' in text
-    assert "version: 0.1.0" in text
+    assert re.search(r"^version: \d+\.\d+\.\d+$", text, re.MULTILINE), "缺少合法的 version 行"
 
 
 def test_metadata_declares_version_exactly_once() -> None:
-    """子串断言挡不住"文件后面又冒出一行 version: 9.9.9"，所以数出现次数。"""
+    """子串断言挡不住"文件后面又冒出一行 version: 9.9.9"，所以数出现次数。
+
+    只断言"恰好一条"且"形如 X.Y.Z"，**不硬编码具体版本号**——否则每次发版
+    都要回来改测试，而升版本本身不该让测试变红。
+    """
     if not METADATA_PATH.is_file():
         pytest.fail(f"缺少元数据文件：{METADATA_PATH}")
 
@@ -203,6 +208,7 @@ def test_metadata_declares_version_exactly_once() -> None:
         for line in METADATA_PATH.read_text(encoding="utf-8").splitlines()
         if line.strip().startswith("version:")
     ]
-    assert version_lines == ["version: 0.1.0"], (
-        f"version: 应恰好出现一次且为 0.1.0，实际为 {version_lines}"
+    assert len(version_lines) == 1, f"version: 应恰好出现一次，实际为 {version_lines}"
+    assert re.fullmatch(r"version: \d+\.\d+\.\d+", version_lines[0]), (
+        f"version 必须形如 X.Y.Z，实际为 {version_lines[0]!r}"
     )
