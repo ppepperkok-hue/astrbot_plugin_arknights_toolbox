@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dev dependencies
+        run: python -m pip install --upgrade pip -r requirements-dev.txt
+
+      # 强制读取验证：宪法缺失或条款不全时直接失败
+      - name: Verify constitution
+        run: python scripts/verify_constitution.py
+
+      - name: Ruff (lint)
+        run: python -m ruff check .
+
+      - name: Ruff (format check)
+        run: python -m ruff format --check .
+
+      - name: Pytest
+        run: python -m pytest -q
