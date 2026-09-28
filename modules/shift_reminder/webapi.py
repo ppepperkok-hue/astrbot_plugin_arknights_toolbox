@@ -79,6 +79,7 @@ def build_status(
     roster_imported: bool,
     breaker_open: bool,
     consecutive_failures: int,
+    shifts: Sequence[Any] = (),
 ) -> dict[str, Any]:
     """组装页面要的状态 JSON。
 
@@ -90,6 +91,8 @@ def build_status(
         roster_imported: 排班表是否已导入。V1.5 才会写入该状态，未实现时为 False。
         breaker_open: 推送熔断是否已打开。
         consecutive_failures: 连续失败次数。
+        shifts: 当前三班定义，供页面表单预填（**只读用途**；校验与写入在服务端，
+            前端那份只是显示）。
 
     Returns:
         可 JSON 序列化的 dict；字段形状见本模块 docstring 与测试。
@@ -108,5 +111,12 @@ def build_status(
         "binding": {"bound": bound},
         "breaker": {"open": breaker_open, "consecutive_failures": consecutive_failures},
         "roster": {"imported": roster_imported},
+        "shifts": [
+            {
+                **shift_brief(shift),
+                "hours": shift.duration_minutes // 60,
+            }
+            for shift in shifts
+        ],
         "recent": [record_brief(item) for item in recent],
     }

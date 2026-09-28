@@ -11,7 +11,12 @@ from types import SimpleNamespace
 import pytest
 
 from modules.shift_reminder import module as reminder_module
-from modules.shift_reminder.module import JOB_PREFIX, ShiftReminderModule, stale_job_ids
+from modules.shift_reminder.module import (
+    JOB_PREFIX,
+    ROSTER_KEY,
+    ShiftReminderModule,
+    stale_job_ids,
+)
 
 
 def job(name, job_id):
@@ -26,6 +31,7 @@ class FakeCronManager:
         self._jobs = list(jobs)
         self.deleted = []
         self.added = []
+        self.added_kwargs = []
         self.fail_list = fail_list
         self.fail_delete = fail_delete
 
@@ -43,6 +49,7 @@ class FakeCronManager:
     async def add_basic_job(self, **kwargs):
         new = job(kwargs["name"], f"new-{len(self.added) + 1}")
         self.added.append(kwargs["name"])
+        self.added_kwargs.append(kwargs)
         self._jobs.append(new)
         return new
 
@@ -194,3 +201,131 @@ def test_initialize_refuses_to_start_when_purge_fails(monkeypatch, tmp_path):
         asyncio.run(ShiftReminderModule().initialize(SimpleNamespace(cron_manager=fake), CONFIG))
 
     assert fake.added == []
+
+
+# --- 配置热更新（页面改完班次要**真的生效**） -------------------------------
+
+
+def test_apply_config_rebuilds_jobs_with_the_new_times(monkeypatch, tmp_path):
+    """页面改了班次之后，定时任务必须按**新**时刻重建。
+
+    `save_config` 只更新内存与磁盘，**不会**动已经注册的 cron 任务（已核源码，
+    见 implementation.md §2.6）。所以这条是「改了配置真的生效」的唯一保证——
+    少了它，用户会看到面板显示新时刻、提醒却仍按旧时刻跑。
+    """
+    monkeypatch.setattr(reminder_module, "get_astrbot_plugin_data_path", lambda: str(tmp_path))
+
+    fake = FakeCronManager([])
+    module = ShiftReminderModule()
+    asyncio.run(module.initialize(SimpleNamespace(cron_manager=fake), CONFIG))
+    # 按**名字**取，不按下标：注册顺序跟 ShiftTable.shifts 走（按开始时刻排过，
+    # 夜班 02:00 在最前），不是配置里第 1/2/3 班的顺序。
+    first_run = {kw["name"]: kw["cron_expression"] for kw in fake.added_kwargs}
+
+    # 三班整体后移一小时（09:00×12h → 21:00×6h → 03:00×6h，正好闭合）。
+    # 单改一个班的开始时刻会破坏「首尾相接」，那样 validate 会拒绝——那也是对的。
+    shifted = dict(
+        CONFIG,
+        shift_1_start="09:00",
+        shift_2_start="21:00",
+        shift_3_start="03:00",
+    )
+    fake.added_kwargs.clear()
+    asyncio.run(module.apply_config(shifted))
+
+    second_run = {kw["name"]: kw["cron_expression"] for kw in fake.added_kwargs}
+    assert first_run[f"{JOB_PREFIX}早班"] == "50 7 * * *"
+    assert second_run[f"{JOB_PREFIX}早班"] == "50 8 * * *"
+    assert second_run[f"{JOB_PREFIX}晚班"] == "50 20 * * *"
+    assert second_run[f"{JOB_PREFIX}夜班"] == "50 2 * * *"
+    # 表里只剩本轮的三条（上一轮被自己清掉了），不会越堆越多
+    assert [j.job_id for j in fake._jobs] == module._job_ids
+    assert len(module._job_ids) == 3
+
+
+def test_apply_config_updates_the_lead_minutes(monkeypatch, tmp_path):
+    """提前量也要跟着变——它是配置里另一个会改动触发时刻的项。"""
+    monkeypatch.setattr(reminder_module, "get_astrbot_plugin_data_path", lambda: str(tmp_path))
+
+    fake = FakeCronManager([])
+    module = ShiftReminderModule()
+    asyncio.run(module.initialize(SimpleNamespace(cron_manager=fake), CONFIG))
+
+    fake.added_kwargs.clear()
+    asyncio.run(module.apply_config(dict(CONFIG, lead_minutes=30)))
+
+    by_name = {kw["name"]: kw["cron_expression"] for kw in fake.added_kwargs}
+    assert by_name[f"{JOB_PREFIX}早班"] == "30 7 * * *"
+    assert module._lead_minutes == 30
+
+
+def test_apply_config_rejects_illegal_config_and_keeps_jobs(monkeypatch, tmp_path):
+    """非法配置必须抛错（宿主据此拒绝保存），且**不许**把既有任务拆掉。"""
+    monkeypatch.setattr(reminder_module, "get_astrbot_plugin_data_path", lambda: str(tmp_path))
+
+    fake = FakeCronManager([])
+    module = ShiftReminderModule()
+    asyncio.run(module.initialize(SimpleNamespace(cron_manager=fake), CONFIG))
+    before = list(module._job_ids)
+
+    # 三段时长合计 23 小时：非法
+    bad = dict(CONFIG, shift_1_hours=11)
+    with pytest.raises(reminder_module.ConfigError):
+        asyncio.run(module.apply_config(bad))
+
+    assert module._job_ids == before
+    assert [j.job_id for j in fake._jobs] == before
+
+
+# --- 干员名单与班次的对应（回归护栏） ---------------------------------------
+
+
+def test_roster_extra_matches_plans_by_config_order(monkeypatch, tmp_path):
+    """排班表的 ``plans`` 按「第 1/2/3 班」对应，**不是**按开始时刻排序后的顺序。
+
+    回归护栏：`validate()` 会把夜班(02:00)排到最前。若拿排序后的下标去索引
+    ``plans``，早班的提醒里就会显示晚班的干员——**内容全对、只是配错了人**，
+    这种错最难被发现。这条断言把它钉死。
+    """
+    monkeypatch.setattr(reminder_module, "get_astrbot_plugin_data_path", lambda: str(tmp_path))
+
+    fake = FakeCronManager([])
+    module = ShiftReminderModule()
+    asyncio.run(module.initialize(SimpleNamespace(cron_manager=fake), CONFIG))
+
+    module._store.set(
+        ROSTER_KEY,
+        {
+            "shifts": [
+                {
+                    "plan_index": 1,
+                    "rooms": [{"room": "trading", "index": 1, "operators": ["一班的"]}],
+                },
+                {
+                    "plan_index": 2,
+                    "rooms": [{"room": "trading", "index": 1, "operators": ["二班的"]}],
+                },
+                {
+                    "plan_index": 3,
+                    "rooms": [{"room": "trading", "index": 1, "operators": ["三班的"]}],
+                },
+            ]
+        },
+    )
+
+    by_name = {shift.name: shift for shift in module._strategy.table.shifts}
+    assert module._roster_extra(by_name["早班"]) == ["【本班配制】", "贸易站1：一班的"]
+    assert module._roster_extra(by_name["晚班"]) == ["【本班配制】", "贸易站1：二班的"]
+    assert module._roster_extra(by_name["夜班"]) == ["【本班配制】", "贸易站1：三班的"]
+
+
+def test_roster_extra_returns_none_without_import(monkeypatch, tmp_path):
+    """没导入过排班表时返回 None——提醒必须与从前一字不差。"""
+    monkeypatch.setattr(reminder_module, "get_astrbot_plugin_data_path", lambda: str(tmp_path))
+
+    fake = FakeCronManager([])
+    module = ShiftReminderModule()
+    asyncio.run(module.initialize(SimpleNamespace(cron_manager=fake), CONFIG))
+
+    current = module._strategy.table.shifts[0]
+    assert module._roster_extra(current) is None

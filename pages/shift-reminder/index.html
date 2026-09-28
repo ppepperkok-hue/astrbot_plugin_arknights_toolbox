@@ -52,6 +52,47 @@
         </ul>
       </section>
 
+      <section class="card">
+        <h2>编辑班次</h2>
+        <p class="muted">
+          三段时长之和必须正好 24 小时，且上一班的结束时刻正好等于下一班的开始时刻。
+          不符合会当场拒绝保存并说明原因。
+        </p>
+        <form id="shifts-form" class="shifts">
+          <div class="row head-row">
+            <span>班次</span><span>名称</span><span>开始时刻</span><span>时长（小时）</span>
+          </div>
+          <div class="row">
+            <span>第一班</span>
+            <input id="s1-name" type="text" autocomplete="off" />
+            <input id="s1-start" type="text" inputmode="numeric" placeholder="08:00" autocomplete="off" />
+            <input id="s1-hours" type="number" min="1" max="24" step="1" />
+          </div>
+          <div class="row">
+            <span>第二班</span>
+            <input id="s2-name" type="text" autocomplete="off" />
+            <input id="s2-start" type="text" inputmode="numeric" placeholder="20:00" autocomplete="off" />
+            <input id="s2-hours" type="number" min="1" max="24" step="1" />
+          </div>
+          <div class="row">
+            <span>第三班</span>
+            <input id="s3-name" type="text" autocomplete="off" />
+            <input id="s3-start" type="text" inputmode="numeric" placeholder="02:00" autocomplete="off" />
+            <input id="s3-hours" type="number" min="1" max="24" step="1" />
+          </div>
+          <div class="row">
+            <span>提前量</span>
+            <input id="lead-input" type="number" min="0" max="180" step="1" />
+            <span class="muted">分钟</span>
+            <span></span>
+          </div>
+          <div class="actions">
+            <button id="save-shifts" type="submit">保存并生效</button>
+            <span id="save-hint" class="muted"></span>
+          </div>
+        </form>
+      </section>
+
       <p id="error" class="error" hidden></p>
     </main>
 

@@ -187,6 +187,26 @@ def test_build_status_is_json_serializable() -> None:
     assert json.loads(text)["current"]["name"] == "夜班"
 
 
+def test_build_status_exposes_shift_definitions_for_the_editor() -> None:
+    """页面表单要预填当前三班，所以状态里必须带上定义（**只读用途**）。
+
+    注意顺序：`validate()` 按**开始时刻**排序，所以这里出来的是
+    夜班(02:00) → 早班(08:00) → 晚班(20:00)，而不是配置里写的第 1/2/3 班。
+    页面按名字回填，不依赖顺序；而**与排班表对应**时必须用配置的原始顺序
+    （见 `parse_shift_order`）——两件事不能混。
+    """
+    data = _status(datetime(2026, 9, 29, 1, 45), shifts=TABLE.shifts)
+
+    assert [item["name"] for item in data["shifts"]] == ["夜班", "早班", "晚班"]
+    assert data["shifts"][1] == {"name": "早班", "start": "08:00", "end": "20:00", "hours": 12}
+    assert data["shifts"][0]["hours"] == 6
+
+
+def test_build_status_shifts_default_to_empty_list() -> None:
+    """没传定义时给空列表而不是 None——前端 `forEach` 才不会炸。"""
+    assert _status(datetime(2026, 9, 29, 1, 45))["shifts"] == []
+
+
 # --- 装配层接线（路由名、handler、能否真的取到数据） ------------------------
 #
 # 本机没有 AstrBot 运行时，页面渲染与 HTTP 转发只能在服务器上验；但「路由注册成

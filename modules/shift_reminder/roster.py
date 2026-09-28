@@ -18,16 +18,31 @@ from typing import Any
 from .schedule_file import PlanAssignment
 
 __all__ = [
+    "ROOM_LABELS",
     "SHIFT_COUNT",
     "RosterImportError",
     "build_roster",
     "describe_roster",
     "parse_import_argument",
+    "render_roster_lines",
     "resolve_import_path",
 ]
 
 #: 本插件固定三班；排班表的 ``plans`` 数量必须与它一致（裁决见 implementation.md §2.6）。
 SHIFT_COUNT = 3
+
+#: 房型英文键 → 中文名。排班表里是游戏内部的英文房型名，直接发给用户看不懂。
+#: 未知房型**原样显示英文键**而不是丢弃——丢一间房等于给错名单，比显示一个生词更糟。
+ROOM_LABELS = {
+    "trading": "贸易站",
+    "manufacture": "制造站",
+    "power": "发电站",
+    "dormitory": "宿舍",
+    "control": "控制中枢",
+    "meeting": "会客室",
+    "hire": "办公室",
+    "processing": "加工站",
+}
 
 #: 只接受 JSON（用户可能会把 zip 或 txt 一起丢进数据目录）。
 ALLOWED_SUFFIX = ".json"
@@ -225,3 +240,62 @@ def describe_roster(roster: Mapping[str, Any]) -> str:
 
     lines.append(f"合计：{total_rooms} 个房间、{total_operators} 位干员，{total_skipped} 间不动。")
     return "\n".join(lines)
+
+
+def render_roster_lines(roster: Mapping[str, Any] | None, plan_index: int) -> list[str]:
+    """把某一班的干员名单渲染成提醒消息的附加行。
+
+    **跳过 `skipped` 的房间**：排班表作者用这个标记表示「这一班这间房不要动」，
+    渲染进提醒就等于让用户去改一间不该改的房——那是**错误指令**，不是冗余信息
+    （裁决见 docs/implementation/implementation.md §2.6）。干员为空的房间同样不占行。
+
+    Args:
+        roster: `build_roster` 的产物；从未导入过时为 None。
+        plan_index: 班次下标，**从 1 开始**（与 `build_roster` 写入的一致）。
+
+    Returns:
+        可直接拼进 ``notify.render_reminder(extra=...)`` 的行列表。未导入、数据形状
+        不对、下标越界、或该班没有任何可显示的房间时返回**空列表**——调用方据此
+        保持「没导入过排班表就与从前完全一样」的行为。
+    """
+    if not isinstance(roster, Mapping):
+        return []
+
+    shifts = roster.get("shifts")
+    if not isinstance(shifts, Sequence) or isinstance(shifts, (str, bytes)):
+        return []
+    if not 1 <= plan_index <= len(shifts):
+        return []
+
+    shift = shifts[plan_index - 1]
+    if not isinstance(shift, Mapping):
+        return []
+
+    rooms = shift.get("rooms")
+    if not isinstance(rooms, Sequence) or isinstance(rooms, (str, bytes)):
+        return []
+
+    body: list[str] = []
+    for room in rooms:
+        if not isinstance(room, Mapping):
+            continue
+        if room.get("skipped"):
+            # 「这一班这间房不动」——渲染出去会让用户去改一间不该改的房。
+            continue
+
+        names = room.get("operators")
+        if not isinstance(names, Sequence) or isinstance(names, (str, bytes)):
+            continue
+        clean = [name for name in names if isinstance(name, str) and name.strip()]
+        if not clean:
+            continue
+
+        room_key = str(room.get("room", ""))
+        label = ROOM_LABELS.get(room_key, room_key)
+        index = room.get("index")
+        where = f"{label}{index}" if isinstance(index, int) else label
+        body.append(f"{where}：{'、'.join(clean)}")
+
+    if not body:
+        return []
+    return ["【本班配制】", *body]

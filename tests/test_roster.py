@@ -12,11 +12,13 @@ from typing import Any
 import pytest
 
 from modules.shift_reminder.roster import (
+    ROOM_LABELS,
     SHIFT_COUNT,
     RosterImportError,
     build_roster,
     describe_roster,
     parse_import_argument,
+    render_roster_lines,
     resolve_import_path,
 )
 from modules.shift_reminder.schedule_file import parse_schedule_file
@@ -287,3 +289,114 @@ def test_describe_roster_rejects_broken_data() -> None:
         describe_roster({"shifts": [{"rooms": "not-a-list"}]})
     with pytest.raises(RosterImportError):
         describe_roster({"shifts": [{"rooms": ["not-a-mapping"]}]})
+
+
+# --- render_roster_lines（V1.5.3：提醒里带干员） ----------------------------
+
+
+def _roster_with(rooms: list[dict[str, Any]]) -> dict[str, Any]:
+    """只关心第一班，另外两班给空房间——凑够三班即可。"""
+    return {
+        "shifts": [
+            {"plan_index": 1, "plan_name": "一班", "rooms": rooms},
+            {"plan_index": 2, "plan_name": "二班", "rooms": []},
+            {"plan_index": 3, "plan_name": "三班", "rooms": []},
+        ]
+    }
+
+
+def test_render_roster_lines_returns_empty_for_none() -> None:
+    """从未导入过排班表时返回空——提醒必须与从前一字不差。"""
+    assert render_roster_lines(None, 1) == []
+
+
+@pytest.mark.parametrize("plan_index", [0, 4, -1, 99])
+def test_render_roster_lines_rejects_out_of_range_index(plan_index: int) -> None:
+    assert (
+        render_roster_lines(
+            _roster_with([{"room": "trading", "index": 1, "operators": ["甲"]}]), plan_index
+        )
+        == []
+    )
+
+
+def test_render_roster_lines_skips_rooms_marked_skipped() -> None:
+    """`skip: true` = 这一班这间房不要动。渲染出去就是**错误指令**。"""
+    roster = _roster_with(
+        [
+            {"room": "trading", "index": 1, "operators": ["甲", "乙"], "skipped": False},
+            {"room": "trading", "index": 2, "operators": ["丙"], "skipped": True},
+        ]
+    )
+
+    lines = render_roster_lines(roster, 1)
+
+    assert lines[0] == "【本班配制】"
+    assert any("甲" in line for line in lines)
+    assert not any("丙" in line for line in lines)
+
+
+def test_render_roster_lines_skips_empty_rooms() -> None:
+    roster = _roster_with(
+        [
+            {"room": "trading", "index": 1, "operators": []},
+            {"room": "power", "index": 1, "operators": ["甲"]},
+        ]
+    )
+
+    lines = render_roster_lines(roster, 1)
+
+    assert len(lines) == 2  # 标题 + 一间房
+    assert "发电站1" in lines[1]
+
+
+def test_render_roster_lines_returns_empty_when_nothing_to_show() -> None:
+    """全是空房/跳过的房间时返回空列表，而不是只回一个孤零零的标题。"""
+    roster = _roster_with(
+        [
+            {"room": "trading", "index": 1, "operators": [], "skipped": False},
+            {"room": "power", "index": 1, "operators": ["甲"], "skipped": True},
+        ]
+    )
+
+    assert render_roster_lines(roster, 1) == []
+
+
+def test_render_roster_lines_uses_chinese_room_labels() -> None:
+    roster = _roster_with([{"room": "manufacture", "index": 2, "operators": ["甲", "乙"]}])
+
+    assert render_roster_lines(roster, 1) == ["【本班配制】", "制造站2：甲、乙"]
+
+
+def test_render_roster_lines_keeps_unknown_room_key() -> None:
+    """未知房型**原样显示英文键**而不是丢掉——丢一间房等于给错名单。"""
+    roster = _roster_with([{"room": "brand_new_room", "index": 1, "operators": ["甲"]}])
+
+    assert render_roster_lines(roster, 1) == ["【本班配制】", "brand_new_room1：甲"]
+
+
+def test_render_roster_lines_filters_blank_names() -> None:
+    """干员名里的空白项要过滤掉，不能让它进到提醒文案里。"""
+    roster = _roster_with([{"room": "trading", "index": 1, "operators": ["甲", "  ", "", "乙"]}])
+
+    assert render_roster_lines(roster, 1) == ["【本班配制】", "贸易站1：甲、乙"]
+
+
+def test_render_roster_lines_handles_broken_shapes_without_raising() -> None:
+    """数据形状不对时安静返回空——提醒不能因为排班表坏了就不发。"""
+    assert render_roster_lines({"shifts": "nope"}, 1) == []
+    assert render_roster_lines({"shifts": [{"rooms": "nope"}]}, 1) == []
+    assert render_roster_lines({"shifts": [{"rooms": ["nope"]}]}, 1) == []
+    assert render_roster_lines({"shifts": [{"rooms": [{"operators": "甲"}]}]}, 1) == []
+
+
+def test_room_labels_cover_every_room_type_in_fixtures() -> None:
+    """fixture 里出现的房型都要有中文名——不然用户会看到生词。"""
+    text = _load(THREE_SHIFTS)
+    roster = build_roster(
+        parse_schedule_file(text), source=THREE_SHIFTS.name, imported_at=IMPORTED_AT
+    )
+
+    seen = {room["room"] for shift in roster["shifts"] for room in shift["rooms"]}
+    assert seen, "fixture 里应当有房间"
+    assert seen <= set(ROOM_LABELS)

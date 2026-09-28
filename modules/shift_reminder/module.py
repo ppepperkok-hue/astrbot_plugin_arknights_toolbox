@@ -112,6 +112,23 @@ def parse_shift_table(config: Mapping[str, Any]) -> ShiftTable:
     return validate(shifts)
 
 
+def parse_shift_order(config: Mapping[str, Any]) -> tuple[str, ...]:
+    """配置里三班的**原始顺序**（第一班、第二班、第三班）。
+
+    为什么需要它：`validate()` 会按开始时刻把班次重新排序——夜班 02:00 会排到最前。
+    而排班表的 ``plans[0..2]`` 是按作者编排的「第 1/2/3 班」来的。拿**排序后**的
+    下标去索引 ``plans`` 会在跨天班次上张冠李戴：早班的提醒里显示晚班的干员。
+    所以与排班表对应一律用这个顺序，不用 `ShiftTable.shifts` 的顺序。
+    """
+    names: list[str] = []
+    for slot in SHIFT_SLOTS:
+        name = config.get(f"shift_{slot}_name")
+        if not isinstance(name, str) or not name.strip():
+            raise ConfigError(f"shift_{slot}_name 必须是非空字符串，收到 {name!r}")
+        names.append(name.strip())
+    return tuple(names)
+
+
 def parse_lead_minutes(config: Mapping[str, Any]) -> int:
     """读取提前量；必须是 0 或正整数。"""
     raw = config.get("lead_minutes", DEFAULT_LEAD_MINUTES)
@@ -219,6 +236,9 @@ class ShiftReminderModule(Module):
         self._job_ids: list[str] = []
         self._lead_minutes = DEFAULT_LEAD_MINUTES
         self._tz: ZoneInfo | None = None
+        # 三班的**原始顺序**（第1/2/3班）：排班表的 plans 按这个顺序对应，
+        # 不能用 ShiftTable.shifts 的顺序（那个按开始时刻排过）。
+        self._shift_order: tuple[str, ...] = ()
         # `/ak import` 只认这个目录里的文件；由 initialize 填好（见 resolve_import_path）。
         self._data_dir: Path | None = None
 
@@ -226,6 +246,7 @@ class ShiftReminderModule(Module):
 
     async def initialize(self, ctx: Any, config: Mapping[str, Any]) -> None:
         table = parse_shift_table(config)
+        shift_order = parse_shift_order(config)
         lead_minutes = parse_lead_minutes(config)
         timezone = parse_timezone(config)
 
@@ -243,11 +264,31 @@ class ShiftReminderModule(Module):
         self._lead_minutes = lead_minutes
         self._tz = _load_timezone(timezone)
         self._strategy = PeriodStrategy(table, lead_minutes)
+        self._shift_order = shift_order
         self._data_dir = data_dir
         self._store = JsonStateStore(data_dir / "state.json")
         self._send_log = JsonlSendLog(data_dir / "sends.jsonl", keep=SEND_LOG_KEEP)
         self._job_ids = []
 
+        await self._register_jobs(cron_manager, table, lead_minutes, timezone)
+
+        # 放在最后注册：前面任何一步失败都会让 initialize 抛出并被宿主回滚，
+        # 此时页面路由不该已经指向一个没初始化完的实例。
+        self._register_web_api(ctx)
+
+    async def _register_jobs(
+        self,
+        cron_manager: Any,
+        table: ShiftTable,
+        lead_minutes: int,
+        timezone: str,
+    ) -> None:
+        """先清掉自己遗留的任务，再按当前班次表注册。**可重入**。
+
+        ``initialize`` 与 ``apply_config`` 都走这里：前者是首次装载，后者是页面
+        改了班次之后让改动**立刻生效**。两处共用同一段逻辑，就不会出现「启动时
+        会清理、热更新时不清理」这种只在某一条路径上炸的缺陷。
+        """
         purged = await self._purge_stale_jobs(cron_manager)
         logger.info(
             "[ak_toolbox][shift_reminder] 已清理 %d 个历史任务，开始注册 %d 个换班提醒任务",
@@ -255,6 +296,7 @@ class ShiftReminderModule(Module):
             len(table.shifts),
         )
 
+        self._job_ids = []
         for shift in table.shifts:
             job = await cron_manager.add_basic_job(
                 name=f"{JOB_PREFIX}{shift.name}",
@@ -273,9 +315,31 @@ class ShiftReminderModule(Module):
             timezone,
         )
 
-        # 放在最后注册：前面任何一步失败都会让 initialize 抛出并被宿主回滚，
-        # 此时页面路由不该已经指向一个没初始化完的实例。
-        self._register_web_api(ctx)
+    async def apply_config(self, config: Mapping[str, Any]) -> None:
+        """配置被改后重建定时任务，让改动**立刻生效**。
+
+        `save_config` 只保证内存与磁盘更新，**不会**让已经注册的 cron 任务跟着变
+        （已核源码，见 implementation.md §2.6 的前置结论）。如果只保存不重建，
+        用户会看到面板显示新时刻、提醒却仍按旧时刻跑——每个环节单看都正常，
+        是最难查的一类错。
+
+        配置非法一律抛错：宿主会把失败原因回给页面，用户看得到「没保存成功」，
+        而不是以为成功了。
+        """
+        cron_manager = getattr(self._ctx, "cron_manager", None)
+        if cron_manager is None:
+            raise RuntimeError("取不到 AstrBot 的 cron_manager，无法重建换班提醒任务。")
+
+        table = parse_shift_table(config)
+        shift_order = parse_shift_order(config)
+        lead_minutes = parse_lead_minutes(config)
+        timezone = parse_timezone(config)
+
+        self._lead_minutes = lead_minutes
+        self._tz = _load_timezone(timezone)
+        self._strategy = PeriodStrategy(table, lead_minutes)
+        self._shift_order = shift_order
+        await self._register_jobs(cron_manager, table, lead_minutes, timezone)
 
     async def _purge_stale_jobs(self, cron_manager: Any) -> int:
         """删掉上一条进程遗留的定时任务，返回清掉的条数。
@@ -352,6 +416,37 @@ class ShiftReminderModule(Module):
 
         return handler
 
+    def _roster_extra(self, current: Any) -> list[str] | None:
+        """当前班次该显示的房间与干员；**没导入过排班表时返回 None**。
+
+        返回 None 时调用方照旧渲染，于是「从未导入过」的用户看到的提醒与从前
+        一字不差——那是绝大多数人的第一天状态，不能被这个功能改变。
+
+        班次与排班表靠**下标**对应（`build_roster` 用 `plan_index` 记录），不靠名字：
+        排班表里的 `plans[].name` 写法五花八门，而下标是唯一稳定的对应关系。
+        """
+        strategy, store = self._strategy, self._store
+        if strategy is None or store is None:
+            return None
+
+        data = store.get(ROSTER_KEY)
+        if data is None:
+            return None
+
+        try:
+            # 用**配置的原始顺序**，不是 ShiftTable.shifts 的顺序：后者按开始时刻
+            # 排过（夜班 02:00 会跑到最前），而 plans 是按第 1/2/3 班编的。
+            plan_index = self._shift_order.index(current.name) + 1
+        except ValueError:
+            logger.warning(
+                "[ak_toolbox][shift_reminder] 配置里找不到当前班次 %s，本次不附干员名单",
+                getattr(current, "name", current),
+            )
+            return None
+
+        lines = roster.render_roster_lines(data, plan_index)
+        return lines or None
+
     async def _push(self, shift_name: str) -> None:
         """一次提醒推送。每条失败路径都留痕，不静默。"""
         if self._breaker.is_open:
@@ -386,6 +481,7 @@ class ShiftReminderModule(Module):
             starting=snapshot.upcoming,
             change_at=snapshot.change_at,
             lead_minutes=self._lead_minutes,
+            extra=self._roster_extra(snapshot.current),
         )
         sent = await self._ctx.send_message(umo, MessageChain().message(text))
 
@@ -450,6 +546,7 @@ class ShiftReminderModule(Module):
             starting=snapshot.upcoming,
             change_at=snapshot.change_at,
             lead_minutes=self._lead_minutes,
+            extra=self._roster_extra(snapshot.current),
         )
         sent = await self._ctx.send_message(
             event.unified_msg_origin, MessageChain().message(f"[测试]\n{text}")
@@ -594,5 +691,6 @@ class ShiftReminderModule(Module):
             roster_imported=self._store.get(ROSTER_KEY) is not None,
             breaker_open=self._breaker.is_open,
             consecutive_failures=self._breaker.consecutive_failures,
+            shifts=self._strategy.table.shifts,
         )
         return json_response(payload)

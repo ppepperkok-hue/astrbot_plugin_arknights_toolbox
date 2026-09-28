@@ -61,6 +61,26 @@ class Module(ABC):
         实现应保证**可安全重复调用**：宿主回滚一次失败的启动之后，框架不会再调它。
         """
 
+    async def apply_config(self, config: Mapping[str, Any]) -> None:
+        """插件配置被改动后由宿主调用：让运行中的状态跟上新配置。
+
+        为什么需要它（已核实 AstrBot 4.28.1 源码）：``AstrBotConfig.save_config``
+        （``core/config/astrbot_config.py:262``）只保证**内存与磁盘**更新，**不会**
+        让已经注册的定时任务跟着变。模块是在 ``initialize`` 里一次性读配置的，
+        所以重新保存配置之后必须有人重建运行状态——否则会得到
+        「面板显示新配置、实际仍按旧配置跑」这种最难查的错。
+
+        Args:
+            config: **本模块自己那一段**的新配置（与 ``initialize`` 同一形状）。
+
+        Note:
+            默认什么都不做：不需要热更新的模块不必关心它。需要热更新的模块
+            应在这里**重建自己的运行状态**（例如重新注册定时任务），
+            但**不要在这里做首次分配资源**——那是 ``initialize`` 的职责，
+            本方法可能被反复调用。
+        """
+        return None
+
     async def handle_command(self, command: str, event: Any) -> bool:
         """处理 ``/ak <command>``。
 

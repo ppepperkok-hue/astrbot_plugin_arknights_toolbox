@@ -66,6 +66,116 @@ function renderCountdown() {
   setText("countdown", hours > 0 ? `还剩 ${hours} 小时 ${minutes} 分` : `还剩 ${minutes} 分`);
 }
 
+/** 把后端给的三班定义填进表单。 */
+function fillForm(data) {
+  const shifts = Array.isArray(data.shifts) ? data.shifts : [];
+  shifts.forEach((shift, index) => {
+    const slot = index + 1;
+    const nameNode = byId(`s${slot}-name`);
+    const startNode = byId(`s${slot}-start`);
+    const hoursNode = byId(`s${slot}-hours`);
+    if (nameNode) {
+      nameNode.value = shift.name ?? "";
+    }
+    if (startNode) {
+      startNode.value = shift.start ?? "";
+    }
+    if (hoursNode) {
+      hoursNode.value = shift.hours ?? "";
+    }
+  });
+
+  const leadNode = byId("lead-input");
+  if (leadNode && data.lead_minutes !== undefined && data.lead_minutes !== null) {
+    leadNode.value = data.lead_minutes;
+  }
+}
+
+/**
+ * 收集表单并组装成配置片段。
+ *
+ * 这里只做「填没填」这种一眼可见的检查；真正决定能不能用的是**服务端**的校验
+ * （时长合计 24 小时、首尾相接）。前端校验能被绕过，所以它只是省一次往返，
+ * 绝不是防线。
+ */
+function collectForm() {
+  const shift = {};
+  for (let slot = 1; slot <= 3; slot += 1) {
+    const name = (byId(`s${slot}-name`)?.value ?? "").trim();
+    const start = (byId(`s${slot}-start`)?.value ?? "").trim();
+    const hoursRaw = (byId(`s${slot}-hours`)?.value ?? "").trim();
+    if (!name || !start || !hoursRaw) {
+      throw new Error(`第 ${slot} 班的名称、开始时刻、时长都要填。`);
+    }
+    const hours = Number(hoursRaw);
+    if (!Number.isInteger(hours) || hours < 1 || hours > 24) {
+      throw new Error(`第 ${slot} 班的时长必须是 1~24 的整数小时。`);
+    }
+    shift[`shift_${slot}_name`] = name;
+    shift[`shift_${slot}_start`] = start;
+    shift[`shift_${slot}_hours`] = hours;
+  }
+
+  const leadRaw = (byId("lead-input")?.value ?? "").trim();
+  const lead = leadRaw === "" ? 10 : Number(leadRaw);
+  if (!Number.isInteger(lead) || lead < 0 || lead > 180) {
+    throw new Error("提前量必须是 0~180 的整数分钟。");
+  }
+  shift.lead_minutes = lead;
+
+  return { shift_reminder: shift };
+}
+
+async function saveShifts(event) {
+  if (event) {
+    event.preventDefault();
+  }
+  const button = byId("save-shifts");
+  const hint = byId("save-hint");
+
+  let payload;
+  try {
+    payload = collectForm();
+  } catch (error) {
+    showError(String(error.message || error));
+    return;
+  }
+
+  if (button) {
+    button.disabled = true;
+  }
+  if (hint) {
+    hint.textContent = "正在保存…";
+  }
+
+  try {
+    const result = normalize(await window.AstrBotPluginPage.apiPost("config", payload));
+    // 后端会在校验失败时返回错误，而且**不会**留下坏配置（它会回滚）。
+    if (result && result.status === "error") {
+      showError(`保存失败：${result.message || "配置不合法"}`);
+      if (hint) {
+        hint.textContent = "未生效";
+      }
+      return;
+    }
+    hideError();
+    if (hint) {
+      hint.textContent = "已保存并生效";
+    }
+    await refresh();
+  } catch (error) {
+    console.error("保存配置失败", error);
+    showError(`保存失败：${error && error.message ? error.message : error}`);
+    if (hint) {
+      hint.textContent = "未生效";
+    }
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
+}
+
 function renderRecent(list) {
   const box = byId("recent");
   if (!box) {
@@ -140,6 +250,7 @@ function render(payload) {
   setText("roster", roster.imported ? "已导入" : "未导入（提醒里暂不含干员名单）");
 
   renderRecent(data.recent);
+  fillForm(data);
 
   setText("status-line", `读取时间 ${String(data.now || "").replace("T", " ").slice(0, 19)}`);
 }
@@ -174,6 +285,11 @@ async function main() {
   const button = byId("refresh");
   if (button) {
     button.addEventListener("click", refresh);
+  }
+
+  const form = byId("shifts-form");
+  if (form) {
+    form.addEventListener("submit", saveShifts);
   }
 
   await refresh();
