@@ -55,6 +55,26 @@ python -m pytest -q             → 45 passed
 | 6 | **指令权限**：`/ak` 目前对任何会话开放 | S5 实现具体子命令时必须加权限（只允许已绑定的目标），否则别人也能查/改你的排班 |
 | 7 | `main.py` 装载空注册表时只打一行「已装载模块：（无）」 | S1 阶段属于如实反映；S3 装配后应改为在**无任何模块开启**时打 WARNING，避免"静默什么都没发生" |
 
+---
+
+## S6 部署进度（2026-09-29）
+
+| 步骤 | 状态 | 证据 |
+| --- | --- | --- |
+| 打包上传 | ✅ | `git archive` → `scp` → `/opt/astrbot/data/plugins/astrbot_plugin_arknights_toolbox` |
+| AstrBot 加载 | ✅ | 日志 `Plugin astrbot_plugin_arknights_toolbox (0.1.0)`、`Loading plugin ...`；**零 ImportError / Traceback**；共 40 个插件加载；`aiocqhttp(OneBot v11) 适配器已连接` |
+| 模块启用 | ⏳ | 日志 `[ak_toolbox] 已装载模块：（无）` —— 这是裁决 D2 的预期后果；S3C 正在落地 D3 开关 + 模块自动发现 |
+| `/ak` 指令实测 | ⏳ | 待模块启用后做 |
+| 到点推送实测 | ⏳ | 待办 |
+
+### 部署方式与回滚（实测出来的）
+
+- **上传方式**：`git archive HEAD` 打包 → `scp` → 服务器 `tar xzf` 到插件目录。
+  **不用 `git clone`**：匿名 clone 被 GitHub 要求认证（`could not read Username`），`codeload` 的 tarball 通道也返回 404。注意 Windows 下 `scp` 的本地路径若写成 `D:\...` 会被当成 `host:path`，必须用相对路径。
+- **重启**：`docker restart astrbot`（**已获用户明确批准**；两个 QQ 机器人约 40 秒后自动重连，实测 `适配器已连接`）。
+- **回滚**：`rm -rf /opt/astrbot/data/plugins/astrbot_plugin_arknights_toolbox && docker restart astrbot`。
+- **数据不受影响**：插件数据在 `plugin_data/`，删插件目录不删数据。
+
 ## S1 分片进度
 
 | 包 | 内容 | 状态 | 报告 |

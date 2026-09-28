@@ -14,11 +14,18 @@ from astrbot.api import logger
 from astrbot.api.event import MessageChain
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
-# 插件以「包」的形式被 AstrBot 加载，运行时 `core` 不在 sys.path 上，
-# 所以这里只能用父级相对导入；`ruff.toml` 已为 modules/*/module.py 放行 TID252。
-# （`tests/` 侧走绝对导入，因为 pyproject.toml 已配 pythonpath = ["."]。）
-from ...core.module import Module
-from ...core.storage import JsonlSendLog, JsonStateStore, SendRecord
+# 两种运行场景的导入差异：
+#   * AstrBot 加载时插件是一个包（`<plugin>.modules.shift_reminder.module`），
+#     插件根目录**不在** sys.path 上 → 只能用父级相对导入；
+#   * 从仓库根直接跑 pytest 时（pyproject 配了 `pythonpath = ["."]`），顶层包是
+#     `modules`，此时 `...` 会越界 → 必须用 `core.*` 绝对导入。
+# 先绝对、失败再回退相对，两种场景都能工作；注册表的自动发现也才 import 得动它。
+try:  # pragma: no cover - 走哪支取决于运行场景，两支都是真实路径
+    from core.module import Module
+    from core.storage import JsonlSendLog, JsonStateStore, SendRecord
+except ImportError:  # pragma: no cover
+    from ...core.module import Module
+    from ...core.storage import JsonlSendLog, JsonStateStore, SendRecord
 from . import notify, scheduler
 from .schedule import ConfigError, Shift, ShiftTable, parse_hhmm, validate
 from .strategy import PeriodStrategy

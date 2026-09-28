@@ -7,15 +7,20 @@
 
 import asyncio
 import json
+import sys
+import types
 from pathlib import Path
 
 import pytest
 
+import core.registry as registry_module
 from core.module import Module
 from core.registry import (
+    ModuleDiscoveryError,
     ModuleRegistry,
     UnknownModuleError,
     build_registry,
+    discover_modules,
     known_module_names,
     read_module_switches,
     register_module,
@@ -314,23 +319,75 @@ def _default_config_from_schema(schema: dict) -> dict:
     return {key: build(node) for key, node in schema.items()}
 
 
-def test_schema_seam_yields_empty_registry_without_error():
-    """schema 与注册表之间的接缝在 S1 阶段必须是安全的。
+def test_schema_seam_actually_loads_the_shift_module():
+    """schema 与注册表之间的接缝必须**真的通**。
 
-    这条测的是真实接缝：从 `_conf_schema.json` 生成默认配置 → 解析开关 →
-    建注册表。人手构造的 dict 测不到它。
+    这条测的是真实接缝：从 `_conf_schema.json` 递归生成默认配置 → 解析开关 →
+    自动发现模块 → 建注册表。人手构造的 dict 测不到它。
+
+    S3 起 `modules` 段存在且 `shift_reminder` 默认开启，所以这里必须真的装载出
+    `shift_reminder` —— 只断言「空注册表也不报错」等于什么都没测。
     """
     if not SCHEMA_PATH.is_file():
         pytest.fail(f"缺少配置文件：{SCHEMA_PATH}")
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 
     switches = read_module_switches(_default_config_from_schema(schema))
+    assert switches == {"shift_reminder": True}
 
-    # schema 里没有 modules 段（裁决 D2），所以解析结果必然是空的
-    assert switches == {}
+    discover_modules()
     registry = build_registry(switches)
-    assert len(registry) == 0
-    assert registry.enabled_names == ()
+    assert registry.enabled_names == ("shift_reminder",)
+
+
+# --- 模块自动发现 -----------------------------------------------------------
+
+
+def test_discover_modules_finds_shift_reminder_and_is_idempotent():
+    """自动发现必须找得到真实模块，且重复调用结果一致。"""
+    first = discover_modules()
+    second = discover_modules()
+
+    assert "shift_reminder" in first
+    assert set(first) == set(second)
+    assert "shift_reminder" in known_module_names()
+
+
+def test_discover_modules_rejects_name_mismatch(monkeypatch):
+    """目录名与 `Module.name` 不一致时必须抛错——不许静默登记成别的名字。"""
+    package = types.ModuleType("modules.mismatch")
+    package.__path__ = []
+    entry = types.ModuleType("modules.mismatch.module")
+
+    class WrongName(Module):
+        name = "not_mismatch"
+        config_key = "not_mismatch"
+
+        async def initialize(self, ctx, config):  # pragma: no cover - 不会被调用
+            return None
+
+        async def terminate(self):  # pragma: no cover - 不会被调用
+            return None
+
+    WrongName.__module__ = "modules.mismatch.module"
+    entry.WrongName = WrongName
+    monkeypatch.setitem(sys.modules, "modules.mismatch", package)
+    monkeypatch.setitem(sys.modules, "modules.mismatch.module", entry)
+    monkeypatch.setattr(registry_module, "_import_modules_package", lambda: package)
+    monkeypatch.setattr(
+        registry_module.pkgutil,
+        "iter_modules",
+        lambda path: [types.SimpleNamespace(name="mismatch", ispkg=True)],
+    )
+
+    with pytest.raises(ModuleDiscoveryError, match="与目录名不一致"):
+        discover_modules()
+
+
+def test_discover_modules_reports_unimportable_entry():
+    """入口文件导入不进来时要抛明确错误，而不是静默跳过这个模块。"""
+    with pytest.raises(ModuleDiscoveryError, match="导入失败"):
+        registry_module._load_module_class("modules.__no_such__.module", "__no_such__")
 
 
 # --- 基类契约 ---------------------------------------------------------------

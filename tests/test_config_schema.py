@@ -96,14 +96,17 @@ def test_schema_drops_the_old_nested_shifts_section(schema: dict[str, Any]) -> N
     assert "shifts" not in schema
 
 
-def test_schema_has_no_modules_section_yet(schema: dict[str, Any]) -> None:
-    """`modules` 开关段留到 S3 装配模块时再加（裁决 D2）。
+def test_schema_declares_modules_section_with_default_on(schema: dict[str, Any]) -> None:
+    """`modules` 开关段已落地（裁决 D1/D3），且 `shift_reminder` 默认开启。
 
-    理由是「S1 还没有可开的模块」，**不是**"加了会让注册表因未知模块名抛错"——
-    已核实 `_config_schema_to_default_config` 对 `object` 忽略顶层 `default`、
-    只用 `items` 递归生成，空 `items` 只会生成 `{}`，不会凭空造出模块名。
+    这条原本是 D2 的护栏（断言「不存在 modules 段」）。D3 生效后护栏跟着掉头：
+    它现在保证「开关段存在、默认值是开发者想要的那个」，而不是被悄悄删掉或改默认值。
     """
-    assert "modules" not in schema
+    assert "modules" in schema
+    section = schema["modules"]
+    assert section["type"] == "object"
+    assert section["items"]["shift_reminder"]["type"] == "bool"
+    assert section["items"]["shift_reminder"]["default"] is True
 
 
 # --- 默认配置必须合法（这是本包最要紧的一条） ------------------------------

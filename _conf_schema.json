@@ -1,4 +1,17 @@
 {
+  "modules": {
+    "type": "object",
+    "description": "模块开关",
+    "hint": "每个模块可单独开关；关掉的模块不会注册任何定时任务或指令。",
+    "items": {
+      "shift_reminder": {
+        "type": "bool",
+        "description": "基建换班提醒",
+        "hint": "按下面的三班定义注册定时提醒，在每班换班前若干分钟推送。需要先用 /ak bind 绑定提醒目标；未绑定时不会推送，只在日志里留一条警告。",
+        "default": true
+      }
+    }
+  },
   "shift_reminder": {
     "type": "object",
     "description": "基建换班提醒模块",

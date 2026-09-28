@@ -14,7 +14,7 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.star import Context, Star
 
-from .core.registry import ModuleRegistry, build_registry, read_module_switches
+from .core.registry import ModuleRegistry, build_registry, discover_modules, read_module_switches
 
 
 class ArknightsToolbox(Star):
@@ -43,6 +43,10 @@ class ArknightsToolbox(Star):
         ``:1963`` 的停用/重载路径）。不回滚就会留下已注册定时任务的"半个模块"。
         """
         self._registry = None
+        # 自动发现 modules/ 下的模块包。宿主**不认识任何具体功能**（架构红线，
+        # 见 docs/architecture/scope.md §2）：新增模块只需往 modules/ 加一个子包。
+        # 发现阶段出问题要当场抛，绝不静默少装一个模块。
+        discover_modules()
         # 未知模块名在这一步就抛错，此时还没有任何模块被启动，无需回滚
         registry = build_registry(read_module_switches(self._config))
         try:

@@ -5,6 +5,8 @@
 保持零依赖才能被 pytest 直接覆盖（见 docs/architecture/rules.md §2）。
 """
 
+import importlib
+import pkgutil
 from collections.abc import Callable, Iterator, Mapping
 from typing import Any
 
@@ -12,9 +14,17 @@ from .module import Module
 
 ModuleFactory = Callable[[], Module]
 
-# 已知模块表：模块在装配时登记（docs/architecture/extension.md §1 第 6 步）。
-# S1 阶段**刻意留空**——此时任何模块开关都会因为"未登记"而报错，
-# 这正是我们要的：宁可显式失败，也不静默少装一个模块。
+# 插件自己的包名：AstrBot 加载时是 `<插件包>`，在仓库根直接跑 pytest 时是空串。
+# 用它拼出 modules 包的绝对名，同一份代码在两种场景下都能定位模块目录。
+_PLUGIN_PACKAGE = __package__.rsplit(".", 1)[0] if __package__ and "." in __package__ else ""
+MODULES_PACKAGE = f"{_PLUGIN_PACKAGE}.modules" if _PLUGIN_PACKAGE else "modules"
+
+# 模块入口文件名约定：`<模块包>/module.py`
+MODULE_ENTRY_NAME = "module"
+
+# 已知模块表：由 `discover_modules()` 在插件加载时扫描填充——
+# 新增模块只需在 `modules/` 下加一个子包，宿主不必认识任何具体功能
+# （见 docs/architecture/scope.md §2）。测试里也可显式 `register_module()`。
 _KNOWN_MODULES: dict[str, ModuleFactory] = {}
 
 # 配置里承载模块开关的键：{"modules": {"<模块名>": true|false}}
@@ -179,3 +189,80 @@ def build_registry(enabled: Mapping[str, bool]) -> ModuleRegistry:
         if is_enabled:
             registry.add(_KNOWN_MODULES[name]())
     return registry
+
+
+class ModuleDiscoveryError(ValueError):
+    """自动发现模块时发现问题。"""
+
+
+def discover_modules() -> dict[str, ModuleFactory]:
+    """扫描 `modules/` 下的子包，把其中的 `Module` 子类登记进注册表。
+
+    约定（见 docs/architecture/extension.md §1）：模块目录名 = 模块 id =
+    `Module.name`，模块类定义在 `<模块包>/module.py` 里。
+
+    这样一来宿主**不必 import 任何具体模块**（架构红线：宿主不认识具体功能），
+    新增模块只要往 `modules/` 下加一个子包。
+
+    Returns:
+        本次发现的「模块名 → 工厂」映射。
+
+    Raises:
+        ModuleDiscoveryError: 模块目录无法导入、入口文件里没有 `Module` 子类、
+            有多个子类、或类属性 `name` 与目录名不一致。**一律显式失败**，
+            绝不静默跳过——少装了一个模块却显示加载成功是最难查的那种 bug
+            （项目宪法 §2 第 2 条）。
+
+    Note:
+        幂等：重复调用结果一致（同名覆盖登记）。
+    """
+    package = _import_modules_package()
+    discovered: dict[str, ModuleFactory] = {}
+    for info in pkgutil.iter_modules(package.__path__):
+        if not info.ispkg or info.name.startswith("_"):
+            continue
+        entry_name = f"{MODULES_PACKAGE}.{info.name}.{MODULE_ENTRY_NAME}"
+        module_cls = _load_module_class(entry_name, info.name)
+        if module_cls.name != info.name:
+            raise ModuleDiscoveryError(
+                f"模块「{info.name}」的类属性 name={module_cls.name!r} 与目录名不一致；"
+                "两者必须相同（见 docs/architecture/extension.md §1）"
+            )
+        register_module(info.name, module_cls)
+        discovered[info.name] = module_cls
+    return discovered
+
+
+def _import_modules_package() -> Any:
+    """导入 `modules` 包本身；失败时转成可读的领域错误。"""
+    try:
+        return importlib.import_module(MODULES_PACKAGE)
+    except Exception as exc:  # noqa: BLE001 - 统一转成领域错误并保留原始原因
+        raise ModuleDiscoveryError(f"无法导入模块目录 {MODULES_PACKAGE}：{exc!r}") from exc
+
+
+def _load_module_class(entry_name: str, module_name: str) -> type[Module]:
+    """从 `<模块包>.module` 里取出**唯一**的 `Module` 子类。"""
+    try:
+        entry = importlib.import_module(entry_name)
+    except Exception as exc:  # noqa: BLE001 - 同上
+        raise ModuleDiscoveryError(
+            f"模块「{module_name}」的入口 {entry_name} 导入失败：{exc!r}"
+        ) from exc
+
+    candidates = [
+        obj
+        for obj in vars(entry).values()
+        if isinstance(obj, type)
+        and issubclass(obj, Module)
+        and obj is not Module
+        and obj.__module__ == entry_name
+    ]
+    if not candidates:
+        raise ModuleDiscoveryError(f"模块「{module_name}」的 {entry_name} 里没有 Module 子类")
+    if len(candidates) > 1:
+        names = "、".join(sorted(cls.__name__ for cls in candidates))
+        raise ModuleDiscoveryError(
+            f"模块「{module_name}」的 {entry_name} 里有多个 Module 子类（{names}），无法确定用哪个"
+        )
+    return candidates[0]
