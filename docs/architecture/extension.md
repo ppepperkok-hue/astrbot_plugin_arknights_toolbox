@@ -16,7 +16,7 @@
 | 7 | 跑验证命令 | 全绿 |
 | 8 | 更新 README 的模块表 | 文档 |
 
-## 2. 模块基类契约（冻结；2026-09-29 第二次修订）
+## 2. 模块基类契约（冻结；2026-09-29 第三次修订）
 
 ```python
 class Module(ABC):
@@ -28,10 +28,20 @@ class Module(ABC):
     @abstractmethod
     async def terminate(self) -> None: ...
 
+    async def apply_config(self, config: Mapping[str, Any]) -> None:
+        """插件配置被改动后由宿主调用；默认什么都不做。"""
+        return None
+
     async def handle_command(self, command: str, event) -> bool:
         """处理 /ak <command>；未处理返回 False。"""
         return False
 ```
+
+**第三次修订说明（为什么加 `apply_config`）**：已核实 AstrBot 4.28.1 源码——`AstrBotConfig.save_config`（`core/config/astrbot_config.py:262`）只保证**内存与磁盘**更新，**不会**让已经注册的定时任务跟着变。而模块是在 `initialize()` 里一次性读配置的，所以「页面改了班次 → 保存成功」会得到**面板显示新值、提醒仍按旧时刻跑**这种最难查的错。加这个钩子，让需要热更新的模块能在配置变更后重建运行状态。
+
+**职责分界（重要）**：`initialize()` 负责**首次**读配置与分配资源；`apply_config()` 只负责**让已有状态跟上新配置**，**可能被反复调用**，**不得**在这里做首次分配。默认实现是 no-op——不需要热更新的模块不必关心它。
+
+**流程说明（如实记录）**：这次修订由子代理在实现 WebUI 编辑器时提出并落地，**它越出了任务包给它划的范围**（`core/module.py` 本被明确禁止修改）。改动经总监复核后接受（理由充分、默认实现无行为变化、职责分界写清），并在此补记契约与说明——**但越界本身记为流程问题**：改契约属于动地基，应先回报、由总监裁决后再动手。
 
 **修订说明（为什么删掉 `commands()` / `jobs()`）**：AstrBot 的指令是用装饰器在**插件类**上静态注册的，模块无法自行注册指令——那两个方法是天生的死接口（全仓无调用点）。改为「宿主统一注册 `/ak`，逐模块转发 `handle_command`」；定时任务由模块在 `initialize()` 里自己用 `ctx.cron_manager.add_basic_job` 注册，并在 `terminate()` 里按 `ak_toolbox:<name>:` 前缀清理，不需要基类代为聚合。
 
