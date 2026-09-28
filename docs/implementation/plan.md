@@ -75,6 +75,19 @@ python -m pytest -q             → 45 passed
 - **回滚**：`rm -rf /opt/astrbot/data/plugins/astrbot_plugin_arknights_toolbox && docker restart astrbot`。
 - **数据不受影响**：插件数据在 `plugin_data/`，删插件目录不删数据。
 
+## 上线后发现的问题（本地测不到的）
+
+| # | 现象 | 根因 | 处置 |
+| --- | --- | --- | --- |
+| L1 | **每条 `/ak` 指令用户收到两份回复**：插件一条 + 人格一条 | `handle_command` 用 `ctx.send_message` 主动回复，**没有把事件标记为已处理**，事件继续传播进 LLM 管线。日志证据：`01:53:20 收到 /ak bind` → `01:53:26 respond.stage: AK 的 bind……` | V1-S5A 修复中 |
+| L2 | 首次实测时 `/ak bind` 完全被当聊天 | 当时插件已加载但**注册表为空**（裁决 D2：schema 无 `modules` 段），`/ak` handler 即便触发也无模块可转发 | 已随 D3 落地（`modules.shift_reminder` 默认开 + 模块自动发现）解决 |
+
+> **教训**：L1 这类缺陷**本地单测与 CI 都测不出来**——它只在「插件 + LLM 管线 + 真实消息」三者接上后才显形。这正说明 [skeleton.md](../architecture/skeleton.md) §5 的手动验收清单必须真的跑，不能只信单测绿。
+  **不用 `git clone`**：匿名 clone 被 GitHub 要求认证（`could not read Username`），`codeload` 的 tarball 通道也返回 404。注意 Windows 下 `scp` 的本地路径若写成 `D:\...` 会被当成 `host:path`，必须用相对路径。
+- **重启**：`docker restart astrbot`（**已获用户明确批准**；两个 QQ 机器人约 40 秒后自动重连，实测 `适配器已连接`）。
+- **回滚**：`rm -rf /opt/astrbot/data/plugins/astrbot_plugin_arknights_toolbox && docker restart astrbot`。
+- **数据不受影响**：插件数据在 `plugin_data/`，删插件目录不删数据。
+
 ## S1 分片进度
 
 | 包 | 内容 | 状态 | 报告 |

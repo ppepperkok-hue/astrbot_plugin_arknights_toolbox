@@ -73,7 +73,10 @@ class Module(ABC):
             event: AstrBot 的 ``AstrMessageEvent``。
 
         Returns:
-            处理了返回 ``True``，宿主随即停止分发；不认识这个子命令返回 ``False``，
-            宿主会继续问下一个模块，最后统一回「未知子命令」。
+            处理了返回 ``True``，宿主会**阻止该事件继续传播**
+            （``event.stop_event()``，见 AstrBot 4.28.1 的
+            ``core/platform/astr_message_event.py:348``），因此实现方**必须自己把回复
+            发出去**——例如 ``ctx.send_message(...)``。返回 ``False`` 表示不认识这个
+            子命令，宿主会继续问下一个模块，最后统一回「未知子命令」。
         """
         return False

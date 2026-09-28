@@ -81,12 +81,18 @@ class ArknightsToolbox(Star):
         无参数时默认 ``status``。宿主**不认识任何子命令**，只负责分发；
         全部模块都返回 ``False`` 时明确回「未知子命令」并列出已装载模块，
         不静默吞掉（项目宪法 §2 第 2 条）。
+
+        模块返回 ``True`` 表示它已经处理并自己把回复发出去了，此时必须调用
+        ``event.stop_event()`` 终止事件继续传播——否则事件会一路流进 LLM 管线，
+        用户每条指令收到两份回复，还会白烧一次 LLM 调用
+        （AstrBot 4.28.1 ``core/platform/astr_message_event.py:348``）。
         """
         subcommand = self._parse_subcommand(event.message_str)
         registry = self._registry
         if registry is not None:
             for module in registry:
                 if await module.handle_command(subcommand, event):
+                    event.stop_event()
                     return
         loaded = "、".join(registry.enabled_names) if registry is not None else "（无）"
         yield event.plain_result(
