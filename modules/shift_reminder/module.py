@@ -39,6 +39,41 @@ SEND_LOG_KEEP = 50
 STATUS_RECENT = 5
 DEFAULT_LEAD_MINUTES = 10
 
+# 指令权限模型：私聊一律放行；群聊要求 AstrBot 管理员。
+COMMAND_NAMES = ("bind", "test", "status")
+
+
+def command_allowed(command: str, *, is_group: bool, is_admin: bool) -> tuple[bool, str]:
+    """判定某个 `/ak` 子命令是否允许在此会话执行。
+
+    规则：
+
+    - **私聊无条件允许**。私聊里 `bind` 只把提醒指向发起者自己。旧模型「只允许
+      已绑定的那个会话」会让改绑彻底死锁——绑了 A 就再也换不到 B，A 那个号
+      一旦掉线，功能永久锁死（服务器上已实证）。
+    - **群聊仅限 AstrBot 管理员**。群里 `bind` 会把提醒推到整个群，可能打扰他人；
+      这才是真正需要防的对象。
+
+    纯函数，不 import 框架，可直接单测。
+
+    Args:
+        command: 子命令名，见 `COMMAND_NAMES`。
+        is_group: 事件是否来自群聊。
+        is_admin: 发起者是否 AstrBot 管理员（`AstrMessageEvent.is_admin()`）。
+
+    Returns:
+        `(是否允许, 拒绝原因)`；允许时原因恒为空字符串。
+    """
+    if command not in COMMAND_NAMES:
+        return False, f"未知子命令：{command}。可用：{'、'.join(COMMAND_NAMES)}。"
+    if not is_group or is_admin:
+        return True, ""
+    return False, (
+        "群聊里只有 AstrBot 管理员能操作换班提醒：在群里绑定会把提醒发到整个群，"
+        "可能打扰其他成员。"
+        "想自己收提醒，请私聊我发 /ak bind（私聊不需要管理员）。"
+    )
+
 
 def parse_shift_table(config: Mapping[str, Any]) -> ShiftTable:
     """把扁平配置键组装成**已校验**的班次表。
@@ -268,28 +303,20 @@ class ShiftReminderModule(Module):
         handler = handlers.get(command)
         if handler is None:
             return False
-        if not self._is_allowed(event):
-            await self._reply(
-                event,
-                "这个会话没有权限操作换班提醒：提醒只属于已绑定的那个会话。"
-                "要改绑请回到原会话执行 /ak bind。",
-            )
+        # 官方 API：`is_private_chat()` 在 core/platform/astr_message_event.py:260，
+        # `is_admin()` 在 :268（其 `role` 由 waking_check/stage.py:105 依据配置的
+        # `admins_id` 置为 "admin"）。直接调用，拿不到就抛——不让权限判定的失败
+        # 静默降级成「放行」。
+        allowed, reason = command_allowed(
+            command,
+            is_group=not event.is_private_chat(),
+            is_admin=event.is_admin(),
+        )
+        if not allowed:
+            await self._reply(event, reason)
             return True
         await handler(event)
         return True
-
-    def _is_allowed(self, event: Any) -> bool:
-        """只允许已绑定的会话；尚未绑定任何人时放行（用于首次绑定）。
-
-        门禁不能等 S5 再补——`status` 会泄露排班与绑定目标，`bind` 会改掉推送目标。
-        """
-        store = self._store
-        if store is None:
-            return False
-        bound = store.get(UMO_KEY)
-        if not isinstance(bound, str) or not bound:
-            return True
-        return event.unified_msg_origin == bound
 
     async def _reply(self, event: Any, text: str) -> None:
         sent = await self._ctx.send_message(event.unified_msg_origin, MessageChain().message(text))
