@@ -1,61 +1,116 @@
-# astrbot_plugin_arknights_toolbox
+# 明日方舟工具箱
 
-> 把我的明日方舟日常收进一个 AstrBot 插件。
+一个 AstrBot 插件：**到点提醒你去《明日方舟》基建换班**。
 
-**当前状态：Phase 1 开发中** —— 宿主骨架与纯逻辑层已落地，正在实现「基建换班提醒」模块（S1–S6）。**尚未部署，也还没有可用的提醒功能。**
+---
 
-## 这是什么
+## 它解决什么
 
-一个 **AstrBot 明日方舟工具箱**：每个能力是一个**可单独开关的模块**，服务器常开就一直在。
+基建换班靠脑子记，结果就是干员心情见底了才想起来。这个插件按你自己填的三班时刻，在每班换班前推一条提醒给你。
 
-**换班提醒只是它的第一个功能，不是它的全部。** 加新模块时不需要改动已有模块的代码——这是这个项目存在的理由。
+它**不需要**登录你的游戏账号，也**不需要**联动 MAA——只是按时刻提醒你该去换班了。这样即使你不装任何辅助工具、甚至游戏不在运行，提醒照样到。
 
-| 模块 | 状态 | 说明 |
+---
+
+## 安装
+
+**从插件市场装（推荐）**
+
+在 AstrBot WebUI 的「插件市场」里搜索 `明日方舟工具箱`，点安装。
+
+**手动装**
+
+把仓库克隆到 AstrBot 的插件目录，然后重启 AstrBot：
+
+```bash
+cd /path/to/astrbot/data/plugins
+git clone https://github.com/ppepperkok-hue/astrbot_plugin_arknights_toolbox.git
+```
+
+---
+
+## 配置
+
+装好后在 WebUI 的插件配置页里填这几项。
+
+**三班时刻**——每一项都是「班次名称 / 开始时刻 / 时长（小时）」：
+
+| 配置项 | 说明 | 默认 |
 | --- | --- | --- |
-| `shift_reminder` 基建换班提醒 | **V1 必做** | 三班可配置、到点经 QQ 主动推送、保底路径零外部依赖 |
-| `skland` 森空岛状态 | V2 | 基建一览 / 干员心情 / 理智；也是"疲劳驱动"的数据源 |
-| `maa` 本机 MAA 触发 | V2 | 电脑在线时替我们跑一次换班（MAA 官方远程控制协议） |
-| `schedule_import` 排班表导入 | V2 | 吃 [riic.autos](https://riic.autos/) 导出的 MAA JSON，让提醒带上干员名单 |
+| `shift_1_name` / `shift_1_start` / `shift_1_hours` | 第一班 | 早班 / 08:00 / 12 |
+| `shift_2_name` / `shift_2_start` / `shift_2_hours` | 第二班 | 晚班 / 20:00 / 6 |
+| `shift_3_name` / `shift_3_start` / `shift_3_hours` | 第三班 | 夜班 / 02:00 / 6 |
+| `lead_minutes` | 提前多少分钟提醒 | 10 |
+| `timezone` | 时区（IANA 名称） | `Asia/Shanghai` |
 
-## 核心约束
+> **两个硬性要求**：三段时长之和必须**正好 24 小时**；而且必须**首尾相接**——上一班的开始时刻加上时长，正好等于下一班的开始时刻。
+>
+> 不符合的话插件会**拒绝加载**，并在日志里明确告诉你哪里断了。这是故意的：宁可当场报错，也不要默默少排一班、让你以为提醒已经生效。
 
-- **服务器常开、电脑不常开** —— 所以调度与提醒长在服务器上；执行端是可选分支（用 MAA，或自己手动）。
-- **保底路径零外部依赖** —— MAA 不在线、森空岛没接、排班表没导入时，提醒必须照常工作。
-- **不复制 AGPL / 无 LICENSE 仓库的代码** —— 需要其能力时按公开协议自己实现。
+班次名称随你习惯叫，中英文都行。
 
-## 文档
+---
 
-| 文档 | 内容 |
+## 使用
+
+装好并配好之后，**私聊机器人**发一条：
+
+```
+/ak bind
+```
+
+把提醒绑定到当前会话。绑定之后到点就会收到提醒。
+
+**指令一览**
+
+| 指令 | 作用 |
 | --- | --- |
-| [AGENTS.md](AGENTS.md) | **项目宪法**：行为规则、开工前必读清单、工程红线 |
-| [docs/implementation/implementation.md](docs/implementation/implementation.md) | **当前阶段实施真元文档**（V1 的 SSOT） |
-| [docs/project-checklist.md](docs/project-checklist.md) | 立项清单（唯一汇总） |
-| [docs/project-plan/04-positioning-revision.md](docs/project-plan/04-positioning-revision.md) | **定位修订：为什么是工具箱而不是提醒插件** |
-| [docs/project-plan/03-requirements-clarification.md](docs/project-plan/03-requirements-clarification.md) | 需求修订：执行端可选、服务器常开、集成三档 |
-| [docs/project-plan/01a-core-value.md](docs/project-plan/01a-core-value.md) | 核心价值（§1–§6 已被 04 取代） |
-| [docs/project-plan/01b-project-goals.md](docs/project-plan/01b-project-goals.md) | 核心目标：可测量的成功标准 |
-| [docs/project-plan/01c-feature-breakdown.md](docs/project-plan/01c-feature-breakdown.md) | 功能拆解（§1–§4 已被 04 取代） |
-| [docs/project-plan/01d-executable-units.md](docs/project-plan/01d-executable-units.md) | 可执行单元与里程碑 |
-| [docs/project-plan/00-market-scan.md](docs/project-plan/00-market-scan.md) | 市场调研：生态里有没有现成的 |
-| [docs/project-plan/01-astrbot-4281-api-facts.md](docs/project-plan/01-astrbot-4281-api-facts.md) | AstrBot 4.28.1 插件 API 逐条实测 |
-| [docs/project-plan/02-integration-research.md](docs/project-plan/02-integration-research.md) | 集成边界与可行性调研（五条线） |
+| `/ak bind` | 把提醒发到当前会话（会覆盖之前的绑定） |
+| `/ak status` | 看当前班次、下一班倒计时、最近几条发送记录 |
+| `/ak test` | 立刻收一条测试提醒（不改动任何设置） |
 
-## 开发环境
+**关于权限**：私聊里任何人都能用——绑定只影响你自己。群聊里只有 AstrBot 管理员能操作，因为**在群里绑定会把提醒推给全体成员**，那不合适。所以想自己收提醒，私聊发就好。
 
-- 目标运行环境：AstrBot **4.28.1**
-- 插件开发指南：[官方文档 · 从这里开始](https://docs.astrbot.app/dev/star/plugin-new.html)
-- 命名约定：`astrbot_plugin_` 前缀 + 全小写 + 无空格
+---
 
-## 本地验证
+## 没收到提醒？按顺序查这几条
 
-改完必须跑这一条，四段全绿才算完成：
+**先发 `/ak test`。** 这是最快的分诊：能收到，说明推送链路没问题，去查第 3 条；收不到，那就是第 1、2 条。
+
+1. **有没有绑定过？** 发 `/ak status`，看「绑定」那一行。空的话发 `/ak bind`。
+2. **机器人还在线吗？** 这是最常见的原因——QQ 号掉登录了（尤其服务器在境外、或号被多地登录时）。看 AstrBot 日志里有没有 `适配器已连接`，没有就是协议端掉了，去 NapCat 那边重新登录。
+3. **班次时刻填对了吗？** 插件配置页里再核一遍：三段时长合计 24 小时，且首尾相接。填错的话插件不会加载定时任务，日志里会写明断在哪。
+4. **提前量是不是比你想的大？** 比如提前 10 分钟，那 08:00 的班是 **07:50** 提醒，不是 08:00。
+5. **是不是已经发过了？** 同一个班次的同一次换班**只提醒一次**（这是故意的，防重复）。插件重载也不会重复推。
+
+还不行的话，把 AstrBot 日志里带 `ak_toolbox` 的行发出来。
+
+---
+
+## 几个已知的行为
+
+- **同时只有一个提醒目标**。重新 `/ak bind` 会把它改到新的会话，不会两边都发。
+- **没绑定时不会推送**，只在日志里记一条警告——不会静默地什么都不做。
+- **连续推送失败**（比如机器人掉线）达到阈值后会**自动暂停**提醒，避免刷屏；推送成功一次就恢复。
+- **发送记录**保留最近 50 条，`/ak status` 显示最近 5 条。
+
+---
+
+## 给开发者
+
+架构、模块契约、如何新增一个功能模块，都在 [docs/architecture/](docs/architecture/)：
+
+- [技术栈与约束](docs/tech-stack.md)
+- [架构规则](docs/architecture/rules.md)（含「纯逻辑禁止 `import astrbot`」的原因）
+- [模块基类契约与接入检查单](docs/architecture/extension.md)
+- [实施记录与验收](docs/implementation/)
+
+本地验证一条命令：
 
 ```bash
 python scripts/verify_constitution.py && ruff check . && ruff format --check . && pytest -q
 ```
 
-CI（[.github/workflows/ci.yml](.github/workflows/ci.yml)）跑的是同一套命令，本地过了 CI 才会过。
-
 ## 许可证
 
-待定。本项目为原创实现，**不复制任何 AGPL / 无 LICENSE 仓库的代码**，以保留自由选择许可证的空间。
+[MIT](LICENSE)
