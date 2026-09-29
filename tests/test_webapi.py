@@ -7,11 +7,12 @@
 """
 
 import asyncio
+import base64
 import json
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
-from astrbot.api.web import PluginUploadFile
+import pytest
 
 from core.storage import SendRecord
 from modules.shift_reminder import module as reminder_module
@@ -452,11 +453,9 @@ def test_roster_view_survives_dirty_entries() -> None:
     assert rooms[0]["operators"] == ["黑键"]
 
 
-# --- 上传 handler ----------------------------------------------------------
+# --- 排班表的展示结构（纯逻辑） ----------------------------------------------
 #
-# 上传成功路径依赖 AstrBot 的 multipart 解析，本机没有框架运行时、测不了真实
-# 上传。这里用 stub 顶住 `request.files()`，覆盖**装配层自己的逻辑**：固定文件名、
-# 体积上限、内容校验、错误码。真实上传留服务器验收。
+# 页面主要靠 `groups` 成块展示；「每行一间房」的平铺结构也保留着，供其它调用方取用。
 
 
 def test_roster_view_exposes_groups_and_totals() -> None:
@@ -544,13 +543,148 @@ def _schedule_json() -> bytes:
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
 
-def _patch_upload(monkeypatch, *uploads) -> None:
-    """把 `request.files()` 换成返回给定的上传文件（键名 file）。"""
+# --- 页面上传：载荷解码（纯函数） --------------------------------------------
+#
+# 上传走 **base64 + JSON POST**，不是 multipart：AstrBot 的插件页面 bridge 用
+# `postMessage` 传数据，而 `FormData` **不能被结构化克隆**——真实浏览器里直接抛
+# 「FormData object could not be cloned.」，文件根本递不到后端（这条是线上实测
+# 出来的，不是推测）。解码与体积判断因此搬进纯逻辑层，也就能在这里精确测。
+#
+# 下面几条直接用很小的 `max_bytes` 打到两条体积防线的边界，不必造几 MB 的字符串。
 
-    async def _files() -> dict:
-        return {"file": uploads[0]} if len(uploads) == 1 else {}
 
-    monkeypatch.setattr(reminder_module.request, "files", _files)
+def _b64(raw: bytes) -> str:
+    return base64.b64encode(raw).decode("ascii")
+
+
+def _upload_body(raw: bytes, filename: str = "roster.json") -> dict:
+    """页面实际发的请求体形状：base64 文本 +（仅供展示的）原文件名。"""
+    return {"filename": filename, "content_b64": _b64(raw)}
+
+
+def _patch_upload(monkeypatch, body) -> None:
+    """把 `request.json()` 换成返回给定的请求体。"""
+
+    async def _json(default=None):
+        return default if body is None else body
+
+    monkeypatch.setattr(reminder_module.request, "json", _json)
+
+
+def test_decode_accepts_plain_base64() -> None:
+    assert webapi.decode_schedule_upload(_b64(b"hello"), max_bytes=5) == b"hello"
+
+
+def test_decode_allows_a_payload_exactly_at_the_limit() -> None:
+    """正好等于上限要**放行**。
+
+    解码前的长度估算会把上界算得比真实值大（填充字符不携带数据），所以那条廉价
+    拒绝必须留余量——卡死在 `max_bytes` 就会把合法文件误杀。这条是那个余量的护栏。
+    """
+    assert webapi.decode_schedule_upload(_b64(b"12345"), max_bytes=5) == b"12345"
+
+
+def test_decode_rejects_oversize_after_decoding() -> None:
+    """解码后超限要拒，且认的是**真实字节数**，不是那个估算值。"""
+    with pytest.raises(webapi.UploadPayloadError) as caught:
+        webapi.decode_schedule_upload(_b64(b"12345"), max_bytes=4)
+
+    assert caught.value.status_code == 413
+    assert "太大" in str(caught.value)
+
+
+def test_decode_rejects_oversize_before_decoding(monkeypatch) -> None:
+    """明显超限的载荷要在**解码前**就被挡掉。
+
+    否则为了量体积反而先把一个超大字符串解码进内存——那正是这条廉价判断存在的理由。
+    用「把 b64decode 换成必炸的函数」来证明它确实没被调用。
+    """
+
+    def _explode(*_args, **_kwargs):
+        raise AssertionError("超大载荷不应该走到解码这一步")
+
+    monkeypatch.setattr(webapi.base64, "b64decode", _explode)
+
+    with pytest.raises(webapi.UploadPayloadError) as caught:
+        webapi.decode_schedule_upload(_b64(b"x" * 1000), max_bytes=8)
+
+    assert caught.value.status_code == 413
+
+
+def test_decode_rejects_invalid_base64() -> None:
+    with pytest.raises(webapi.UploadPayloadError) as caught:
+        webapi.decode_schedule_upload("!!!not base64!!!", max_bytes=1024)
+
+    assert caught.value.status_code == 400
+    assert "base64" in str(caught.value)
+
+
+def test_decode_rejects_non_ascii_text() -> None:
+    """中文字符不是 base64——要给 400，不是让它冒成 500。"""
+    with pytest.raises(webapi.UploadPayloadError) as caught:
+        webapi.decode_schedule_upload("这不是 base64", max_bytes=1024)
+
+    assert caught.value.status_code == 400
+
+
+def test_decode_tolerates_a_data_url_prefix() -> None:
+    """`FileReader.readAsDataURL` 的产物带前缀；自己的前端会切掉，别人可能不切。"""
+    prefixed = "data:application/json;base64," + _b64(b'{"a":1}')
+
+    assert webapi.decode_schedule_upload(prefixed, max_bytes=1024) == b'{"a":1}'
+
+
+def test_decode_tolerates_whitespace_and_missing_padding() -> None:
+    """折行与省略填充都是真实导出工具会干的事；容错它们并不降低校验强度。"""
+    encoded = _b64(b"hello world")
+    unpadded = encoded.rstrip("=")
+    folded = " \n ".join(unpadded[i : i + 4] for i in range(0, len(unpadded), 4))
+
+    assert webapi.decode_schedule_upload(folded, max_bytes=1024) == b"hello world"
+
+
+def test_decode_rejects_empty_and_blank() -> None:
+    for blank in ("", "   ", "\n\t"):
+        with pytest.raises(webapi.UploadPayloadError) as caught:
+            webapi.decode_schedule_upload(blank, max_bytes=1024)
+        assert caught.value.status_code == 400
+        assert "空" in str(caught.value)
+
+
+def test_decode_rejects_base64_of_nothing() -> None:
+    """空字符串的 base64 解出来也是空的——同样要说「文件是空的」。"""
+    with pytest.raises(webapi.UploadPayloadError) as caught:
+        webapi.decode_schedule_upload(_b64(b""), max_bytes=1024)
+
+    assert "空" in str(caught.value)
+
+
+def test_decode_rejects_a_missing_or_wrong_typed_field() -> None:
+    """字段缺失/类型不对是 400，不是 500。"""
+    for bad in (None, 123, b"bytes", ["a"]):
+        with pytest.raises(webapi.UploadPayloadError) as caught:
+            webapi.decode_schedule_upload(bad, max_bytes=1024)
+        assert caught.value.status_code == 400
+
+
+def test_decode_keeps_a_bom_in_the_bytes() -> None:
+    """BOM 由**装配层**剥（它要先把字节解成文本）；解码函数只如实交出字节。"""
+    raw = b"\xef\xbb\xbf{}"
+
+    assert webapi.decode_schedule_upload(_b64(raw), max_bytes=1024) == raw
+
+
+def test_estimate_is_an_upper_bound() -> None:
+    """估算是**上界**——否则解码前的廉价拒绝会误杀合法文件。"""
+    for size in (0, 1, 2, 3, 4, 5, 100, 1000):
+        assert webapi.estimate_decoded_bytes(_b64(b"x" * size)) >= size
+
+
+# --- 上传 handler（装配层） --------------------------------------------------
+#
+# 真实的「浏览器 → bridge → 后端」链路本机测不了（没有 AstrBot 运行时）。这里用
+# stub 顶住 `request.json()`，覆盖**装配层自己的逻辑**：固定文件名、体积、内容
+# 校验、错误码、回执口径。真实上传留服务器验收。
 
 
 def test_web_upload_refuses_before_initialize() -> None:
@@ -560,25 +694,36 @@ def test_web_upload_refuses_before_initialize() -> None:
     assert payload["status_code"] == 503
 
 
-def test_web_upload_rejects_when_no_file(tmp_path, monkeypatch) -> None:
-    """没带文件时必须明确说字段名，而不是含糊的「失败」。"""
+def test_web_upload_rejects_a_body_without_content(tmp_path, monkeypatch) -> None:
+    """缺 content_b64 要说清字段名，而不是含糊的「失败」。"""
     instance, _ = _boot(tmp_path, monkeypatch)
-    _patch_upload(monkeypatch)
+    _patch_upload(monkeypatch, {"filename": "x.json"})
 
     payload = asyncio.run(instance._web_upload())
 
     assert payload["status_code"] == 400
-    assert "file" in payload["error"]
+    assert "content_b64" in payload["error"]
+
+
+def test_web_upload_rejects_a_non_object_body(tmp_path, monkeypatch) -> None:
+    """请求体不是对象时要明确拒绝——别让 `payload.get` 的异常抛给用户看。"""
+    instance, _ = _boot(tmp_path, monkeypatch)
+    _patch_upload(monkeypatch, ["not", "an", "object"])
+
+    payload = asyncio.run(instance._web_upload())
+
+    assert payload["status_code"] == 400
+    assert "JSON 对象" in payload["error"]
 
 
 def test_web_upload_uses_a_fixed_filename_not_the_supplied_one(tmp_path, monkeypatch) -> None:
     """**本包的安全核心**：上传者给什么文件名都无所谓，落盘一律用固定名。
 
     防的是「文件名即输入」——`../../evil.json` 一旦参与路径拼接，就能写到数据
-    目录之外。这里断言恶意名字**没有**被用于任何落盘路径。
+    目录之外。这里断言恶意名字**没有**被用于任何落盘路径（它只被回显给用户看）。
     """
     instance, _ = _boot(tmp_path, monkeypatch)
-    _patch_upload(monkeypatch, PluginUploadFile(_schedule_json(), filename="../../evil.json"))
+    _patch_upload(monkeypatch, _upload_body(_schedule_json(), filename="../../evil.json"))
 
     payload = asyncio.run(instance._web_upload())
 
@@ -591,10 +736,31 @@ def test_web_upload_uses_a_fixed_filename_not_the_supplied_one(tmp_path, monkeyp
     assert "班次" in payload["summary"]
 
 
+def test_web_upload_echoes_the_original_name_for_display_only(tmp_path, monkeypatch) -> None:
+    """原文件名只用于让用户确认「传的是哪个文件」；落盘名仍是固定名。"""
+    instance, _ = _boot(tmp_path, monkeypatch)
+    _patch_upload(monkeypatch, _upload_body(_schedule_json(), filename="我的排班.json"))
+
+    payload = asyncio.run(instance._web_upload())
+
+    assert payload["original_filename"] == "我的排班.json"
+    assert payload["filename"] == reminder_module.UPLOAD_FILENAME
+
+
+def test_web_upload_sanitises_the_echoed_name(tmp_path, monkeypatch) -> None:
+    """文件名是用户完全可控的字符串：换行能在日志里伪造出一整行，回显前要削掉。"""
+    instance, _ = _boot(tmp_path, monkeypatch)
+    _patch_upload(monkeypatch, _upload_body(_schedule_json(), filename="a\nFAKE LOG LINE"))
+
+    payload = asyncio.run(instance._web_upload())
+
+    assert "\n" not in payload["original_filename"]
+
+
 def test_web_upload_records_the_roster_in_the_store(tmp_path, monkeypatch) -> None:
     """导入成功必须真的落进 `ROSTER_KEY`，否则页面显示"已导入"却没有内容。"""
     instance, _ = _boot(tmp_path, monkeypatch)
-    _patch_upload(monkeypatch, PluginUploadFile(_schedule_json()))
+    _patch_upload(monkeypatch, _upload_body(_schedule_json()))
 
     asyncio.run(instance._web_upload())
 
@@ -604,10 +770,13 @@ def test_web_upload_records_the_roster_in_the_store(tmp_path, monkeypatch) -> No
 
 
 def test_web_upload_rejects_oversized_payload(tmp_path, monkeypatch) -> None:
-    """体积上限要能挡住——不是"够用就行"，是别让大文件把内存撑爆。"""
+    """体积上限要能挡住——不是"够用就行"，是别让大文件把内存撑爆。
+
+    这条打的是**解码前的廉价拒绝**：给一段超长 base64 文本即可，不必真造几 MB 字节。
+    """
     instance, _ = _boot(tmp_path, monkeypatch)
-    oversized = b"x" * (reminder_module.MAX_UPLOAD_BYTES + 1)
-    _patch_upload(monkeypatch, PluginUploadFile(oversized))
+    huge = "A" * (reminder_module.MAX_UPLOAD_BYTES * 2)
+    _patch_upload(monkeypatch, {"content_b64": huge})
 
     payload = asyncio.run(instance._web_upload())
 
@@ -615,19 +784,20 @@ def test_web_upload_rejects_oversized_payload(tmp_path, monkeypatch) -> None:
     assert "太大" in payload["error"]
 
 
-def test_web_upload_rejects_empty_file(tmp_path, monkeypatch) -> None:
+def test_web_upload_rejects_empty_payload(tmp_path, monkeypatch) -> None:
     instance, _ = _boot(tmp_path, monkeypatch)
-    _patch_upload(monkeypatch, PluginUploadFile(b""))
+    _patch_upload(monkeypatch, {"content_b64": ""})
 
     payload = asyncio.run(instance._web_upload())
 
     assert payload["status_code"] == 400
+    assert "空" in payload["error"]
 
 
 def test_web_upload_reports_parser_error_not_500(tmp_path, monkeypatch) -> None:
     """坏 JSON 要带出解析器的原因、返回 400——不是 500 让用户面对"服务器错误"。"""
     instance, _ = _boot(tmp_path, monkeypatch)
-    _patch_upload(monkeypatch, PluginUploadFile(b'{"plans": "not a list"}'))
+    _patch_upload(monkeypatch, _upload_body(b'{"plans": "not a list"}'))
 
     payload = asyncio.run(instance._web_upload())
 
@@ -637,7 +807,7 @@ def test_web_upload_reports_parser_error_not_500(tmp_path, monkeypatch) -> None:
 
 def test_web_upload_rejects_non_utf8(tmp_path, monkeypatch) -> None:
     instance, _ = _boot(tmp_path, monkeypatch)
-    _patch_upload(monkeypatch, PluginUploadFile(b"\xff\xfe\x00\x01"))
+    _patch_upload(monkeypatch, _upload_body(b"\xff\xfe\x00\x01"))
 
     payload = asyncio.run(instance._web_upload())
 
@@ -652,7 +822,20 @@ def test_web_upload_tolerates_a_utf8_bom(tmp_path, monkeypatch) -> None:
     `\\ufeff` 直接报错——用户看到「格式不对」根本猜不到是这个原因。
     """
     instance, _ = _boot(tmp_path, monkeypatch)
-    _patch_upload(monkeypatch, PluginUploadFile(b"\xef\xbb\xbf" + _schedule_json()))
+    _patch_upload(monkeypatch, _upload_body(b"\xef\xbb\xbf" + _schedule_json()))
+
+    payload = asyncio.run(instance._web_upload())
+
+    assert payload["saved"] is True, payload
+
+
+def test_web_upload_tolerates_a_data_url_prefix(tmp_path, monkeypatch) -> None:
+    """前端切了前缀，但换个写法可能带上来——多一层容错，少一类"内容没问题却失败"。"""
+    instance, _ = _boot(tmp_path, monkeypatch)
+    _patch_upload(
+        monkeypatch,
+        {"content_b64": "data:application/json;base64," + _b64(_schedule_json())},
+    )
 
     payload = asyncio.run(instance._web_upload())
 
@@ -662,7 +845,7 @@ def test_web_upload_tolerates_a_utf8_bom(tmp_path, monkeypatch) -> None:
 def test_web_roster_returns_view_of_stored_roster(tmp_path, monkeypatch) -> None:
     """页面查询走的是同一份落盘数据，不该另算一套。"""
     instance, _ = _boot(tmp_path, monkeypatch)
-    _patch_upload(monkeypatch, PluginUploadFile(_schedule_json()))
+    _patch_upload(monkeypatch, _upload_body(_schedule_json()))
     asyncio.run(instance._web_upload())
 
     payload = asyncio.run(instance._web_roster())

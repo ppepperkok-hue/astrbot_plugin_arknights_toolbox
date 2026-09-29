@@ -9,6 +9,8 @@
 纯逻辑模块：**禁止 import astrbot**（由 ruff.toml 的 TID 禁入规则强制）。
 """
 
+import base64
+import binascii
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from typing import Any, Protocol
@@ -321,3 +323,113 @@ def roster_view(roster: Mapping[str, Any] | None) -> dict[str, Any]:
         "total_operators": total_operators,
         "shifts": shifts,
     }
+
+
+# --- 页面上传的载荷解码 ------------------------------------------------------
+#
+# 为什么不是 multipart：AstrBot 的插件页面 bridge 用 `postMessage` 与父页面通信，而
+# `FormData` **不能被结构化克隆**——真实浏览器里直接抛
+# 「FormData object could not be cloned.」，文件根本递不到后端。所以前端把文件读成
+# base64、走普通 JSON POST，解码与校验放在这里（纯逻辑，可测）。
+
+#: base64 用 4 个字符编码 3 字节。
+_B64_CHARS_PER_GROUP = 4
+_B64_BYTES_PER_GROUP = 3
+
+#: 按长度估出的上界与真实解码字节数最多相差这么多——base64 的填充字符不携带数据，
+#: 只会让真实值更小。用它给「解码前的廉价拒绝」留出余量，避免把正好等于上限的文件误杀。
+_B64_MAX_PADDING = 2
+
+#: `FileReader.readAsDataURL` 产出的字符串带这个前缀。
+_DATA_URL_MARKER = ";base64,"
+
+
+class UploadPayloadError(ValueError):
+    """页面提交的上传内容不可用。
+
+    Attributes:
+        status_code: 建议回给页面的 HTTP 状态码——参数问题用 400，体积超限用 413。
+            由异常自己带状态码，是为了让「哪一类失败对应哪个码」只有一处定义。
+    """
+
+    def __init__(self, message: str, *, status_code: int = 400) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def estimate_decoded_bytes(content_b64: str) -> int:
+    """按 base64 文本长度估**解码后字节数的上界**（不解码）。
+
+    每 :data:`_B64_CHARS_PER_GROUP` 个字符编码 :data:`_B64_BYTES_PER_GROUP` 字节，
+    所以长度的 3/4 就是上界；填充字符不携带数据，真实值只会更小。
+
+    它的用途是**解码前的廉价拒绝**：先按长度把明显超限的字符串挡掉，免得为了量体积
+    反而把一个超大字符串解码进内存。
+
+    Args:
+        content_b64: base64 文本（可含空白；空白会占长度，但那只让上界更保守）。
+
+    Returns:
+        解码后字节数的上界。
+    """
+    return (len(content_b64) // _B64_CHARS_PER_GROUP) * _B64_BYTES_PER_GROUP
+
+
+def _strip_data_url_prefix(text: str) -> str:
+    """去掉可选的 ``data:...;base64,`` 前缀。
+
+    自己的前端会先切掉它，但换个写法（或有人手搓请求）就可能带上来——容错这一下的
+    代价是两行，收益是一整类「内容明明没问题却上传失败」。
+    """
+    if text.startswith("data:") and _DATA_URL_MARKER in text:
+        return text.split(_DATA_URL_MARKER, 1)[1]
+    return text
+
+
+def _too_large_message(max_bytes: int) -> str:
+    return f"文件太大：上限 {max_bytes // 1024} KB，排班表通常只有几十 KB。"
+
+
+def decode_schedule_upload(content_b64: Any, *, max_bytes: int) -> bytes:
+    """校验并解码页面提交的 base64 文件内容。
+
+    Args:
+        content_b64: 请求体里的 base64 文本（可带 data URL 前缀、可含空白）。
+        max_bytes: **解码后**允许的最大字节数。
+
+    Returns:
+        解码出的原始字节。
+
+    Raises:
+        UploadPayloadError: 内容缺失、为空、不是合法 base64，或超过上限。
+            超限带 ``status_code=413``，其余为 400。
+    """
+    if not isinstance(content_b64, str):
+        raise UploadPayloadError("请求体里缺少 content_b64（应该是 base64 文本）。")
+
+    text = _strip_data_url_prefix(content_b64.strip())
+    # 容忍内部空白（有些工具导出的 base64 会折行）；其余非法字符交给 `validate=True` 挡。
+    text = "".join(text.split())
+    if not text:
+        raise UploadPayloadError("文件是空的。")
+
+    # 解码前先按长度估上界。留 `_B64_MAX_PADDING` 个字节的余量是必须的：上界比真实值
+    # 最多大这么多，卡死在 max_bytes 会把「正好等于上限」的文件误杀。
+    if estimate_decoded_bytes(text) > max_bytes + _B64_MAX_PADDING:
+        raise UploadPayloadError(_too_large_message(max_bytes), status_code=413)
+
+    # 补齐缺失的 `=`：base64 要求长度是 4 的倍数，而有些导出工具会省掉填充。
+    # 补上不改变解码结果（`=` 不携带数据），只是少一类「明明内容没问题却格式不对」。
+    padded = text + "=" * (-len(text) % _B64_CHARS_PER_GROUP)
+
+    try:
+        data = base64.b64decode(padded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise UploadPayloadError("文件内容不是有效的 base64，请重新导出后再试。") from exc
+
+    # 上界只是估算，真实大小以解码结果为准——**上限必须按解码后的字节数算**。
+    if len(data) > max_bytes:
+        raise UploadPayloadError(_too_large_message(max_bytes), status_code=413)
+    if not data:
+        raise UploadPayloadError("文件是空的。")
+    return data

@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 from astrbot.api import logger
 from astrbot.api.event import MessageChain
-from astrbot.api.web import PluginUploadFile, error_response, json_response, request
+from astrbot.api.web import error_response, json_response, request
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
 # 两种运行场景的导入差异：
@@ -752,15 +752,20 @@ class ShiftReminderModule(Module):
         return json_response(webapi.roster_view(self._store.get(ROSTER_KEY)))
 
     async def _web_upload(self) -> Any:
-        """接收页面传来的排班表 JSON 并导入。
+        """接收页面提交的排班表（base64 + JSON POST）并导入。
 
-        安全要点（三条都是硬性的，见任务包约束）：
+        为什么不用 multipart：AstrBot 的插件页面 bridge 用 `postMessage` 与父页面通信，
+        而 `FormData` **不能被结构化克隆**——真实浏览器里直接抛
+        「FormData object could not be cloned.」，文件递不到这里。所以前端把文件读成
+        base64 走普通 JSON POST；解码与体积判断在
+        `webapi.decode_schedule_upload`（纯逻辑、可单测）。
+
+        安全要点（三条都是硬性的）：
 
         1. **绝不使用上传者提供的文件名落盘**——那是伪造输入。一律落成固定名
-           :data:`UPLOAD_FILENAME`，用户叫什么都与磁盘无关。
-        2. **先读进内存校验、合法了才写盘**——避免把脏文件留在数据目录里；体积也在这
-           一步用「多读一个字节」的方式卡住（不依赖 `content-length`，那可以被伪造，
-           也可能缺失）。
+           :data:`UPLOAD_FILENAME`；请求里的 `filename` 只用于日志与回执展示。
+        2. **先解码校验、合法了才写盘**——避免把脏文件留在数据目录里。体积按**解码后**
+           的字节数卡（解码前先按长度做一次廉价拒绝，见 `decode_schedule_upload`）。
         3. **路径不来自用户**——目标路径由 `self._data_dir` 与固定名拼成，
            没有任何用户输入参与拼接。
 
@@ -771,28 +776,21 @@ class ShiftReminderModule(Module):
             return error_response("换班提醒模块尚未初始化完成，请稍后重试", status_code=503)
 
         try:
-            files = await request.files()
-        except Exception as exc:  # noqa: BLE001 - 上传解析失败要给用户明确原因
-            logger.warning("[ak_toolbox][shift_reminder] 读取上传内容失败：%s", exc)
+            payload = await request.json(default={})
+        except Exception as exc:  # noqa: BLE001 - 请求体读不出来要给用户明确原因
+            logger.warning("[ak_toolbox][shift_reminder] 读取上传请求失败：%s", exc)
             return error_response(f"读取上传内容失败：{exc}", status_code=400)
 
-        upload = files.get("file")
-        if not isinstance(upload, PluginUploadFile):
-            return error_response("没有收到文件（表单字段名应为 file）", status_code=400)
+        if not isinstance(payload, Mapping):
+            return error_response("请求体必须是一个 JSON 对象。", status_code=400)
 
         try:
-            raw = await upload.read(MAX_UPLOAD_BYTES + 1)
-        except Exception as exc:  # noqa: BLE001 - 同上
-            logger.warning("[ak_toolbox][shift_reminder] 读取上传文件失败：%s", exc)
-            return error_response(f"读取上传文件失败：{exc}", status_code=400)
-
-        if len(raw) > MAX_UPLOAD_BYTES:
-            return error_response(
-                f"文件太大：上限 {MAX_UPLOAD_BYTES // 1024} KB，排班表通常只有几十 KB。",
-                status_code=413,
+            raw = webapi.decode_schedule_upload(
+                payload.get("content_b64"), max_bytes=MAX_UPLOAD_BYTES
             )
-        if not raw:
-            return error_response("文件是空的。", status_code=400)
+        except webapi.UploadPayloadError as exc:
+            logger.warning("[ak_toolbox][shift_reminder] 页面上传内容被拒绝：%s", exc)
+            return error_response(str(exc), status_code=exc.status_code)
 
         try:
             text = raw.decode("utf-8")
@@ -821,10 +819,15 @@ class ShiftReminderModule(Module):
             return error_response(f"保存文件失败：{exc}", status_code=500)
 
         store.set(ROSTER_KEY, imported)
+        # 请求里的文件名是**用户完全可控**的字符串，进日志前先削掉空白（换行能伪造出
+        # 一整条假日志行），并限长。它到此为止——不参与任何路径拼接。
+        original = payload.get("filename")
+        shown = " ".join(original.split())[:80] if isinstance(original, str) else ""
         logger.info(
-            "[ak_toolbox][shift_reminder] 页面已上传排班表（%d 字节，%d 个班次）",
+            "[ak_toolbox][shift_reminder] 页面已上传排班表（%d 字节，%d 个班次，原文件名 %s）",
             len(raw),
             imported.get("shift_count", 0),
+            shown or "(未提供)",
         )
         return json_response(
             {
@@ -832,5 +835,7 @@ class ShiftReminderModule(Module):
                 "filename": UPLOAD_FILENAME,
                 # 与 /ak import 的回执同口径，用户两处看到的数字一致。
                 "summary": roster.describe_roster(imported),
+                # 回显用户自己的文件名，只为让他确认「传的是哪个文件」。
+                "original_filename": shown,
             }
         )

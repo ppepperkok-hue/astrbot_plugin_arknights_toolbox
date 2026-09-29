@@ -837,6 +837,34 @@ async function loadRoster() {
   }
 }
 
+// 与后端 module.py 的 MAX_UPLOAD_BYTES 保持一致。**服务端才是权威**（真正的上限判定
+// 在 `webapi.decode_schedule_upload`），这里只是先拦一道：把几十 MB 的文件读成 base64
+// 既会把字符串撑大 4/3，postMessage 也搬不动那么大的东西。
+const MAX_UPLOAD_BYTES = 2 * 1024 * 1024;
+
+/**
+ * 把选中的文件读成 base64。
+ *
+ * 为什么不是 FormData：bridge 用 postMessage 往父页面传数据，而 FormData 不能被
+ * 结构化克隆——浏览器会直接抛「FormData object could not be cloned.」。
+ * @param {File} file
+ * @returns {Promise<string>} 不含 data URL 前缀的 base64
+ */
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("浏览器读取文件失败"));
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      // readAsDataURL 的产物形如 "data:application/json;base64,XXXX"，只取逗号之后。
+      // 后端也容忍带前缀的输入，这里切掉纯粹是为了少传那几十个字节。
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 async function uploadRoster() {
   const input = byId("roster-file");
   const button = byId("roster-upload");
@@ -845,16 +873,29 @@ async function uploadRoster() {
     setText("upload-hint", "先选一个 .json 文件再点上传。");
     return;
   }
+  if (file.size > MAX_UPLOAD_BYTES) {
+    setText(
+      "upload-hint",
+      `文件太大：上限 ${MAX_UPLOAD_BYTES / 1024 / 1024} MB，排班表通常只有几十 KB。`
+    );
+    return;
+  }
 
   if (button) {
     button.disabled = true;
   }
-  setText("upload-hint", "正在上传…");
   try {
-    // 用 multipart 上传：后端读的是 request.files()，只有 FormData 能产生它。
-    const form = new FormData();
-    form.append("file", file);
-    const result = normalize(await window.AstrBotPluginPage.apiPost(UPLOAD_ENDPOINT, form));
+    // 两步都说话：文件大时读取也要一会儿，不说用户会以为按钮坏了。
+    setText("upload-hint", "正在读取文件…");
+    const contentB64 = await readFileAsBase64(file);
+
+    setText("upload-hint", "正在上传…");
+    const result = normalize(
+      await window.AstrBotPluginPage.apiPost(UPLOAD_ENDPOINT, {
+        filename: file.name,
+        content_b64: contentB64,
+      })
+    );
     if (result && result.saved) {
       setText("upload-hint", `导入成功。${result.summary || ""}`.trim());
       input.value = "";
