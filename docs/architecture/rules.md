@@ -29,7 +29,7 @@
 | --- | --- | --- |
 | 日志 | 只用 AstrBot 的 `logger`（`from astrbot.api import logger`），**不用 `logging`** | ruff 禁 `import logging`（`TID` 禁入） |
 | 配置非法必须显式失败 | 三班时长和 ≠ 24h、时刻格式错、缺项 → 抛出带明确文案的错误并**不注册定时任务** | 单测覆盖每种非法配置 |
-| 推送失败不得静默 | `context.send_message` **返回 `False` 即视为失败**，计失败数、写 WARNING/ERROR | 单测（mock 返回 False）+ 熔断计数断言 |
+| 推送失败不得静默 | `context.send_message` **返回 `False` 或抛出异常**，两者**都**视为失败，走同一条路径（计失败数、写记录、WARNING/ERROR），异常**不得**冒泡到调度层 | 单测（mock 返回 False 与 mock 抛异常各一条）+ 熔断计数断言 |
 | 禁止裸 `except` | 至少 `except Exception` 并记录，不许 `except: pass` | ruff `E722`（bare except） |
 | 熔断 | 同一平台连续失败达阈值后暂停推送，成功后解除 | 单测覆盖阈值与恢复 |
 

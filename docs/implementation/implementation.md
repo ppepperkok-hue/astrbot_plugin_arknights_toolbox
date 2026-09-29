@@ -101,7 +101,7 @@ async def initialize(self, ctx: Any, config: Mapping[str, Any]) -> None: ...
 | 步骤 | 做什么 | 做到什么程度 | 验收标准 | 验证方式 | 暂时不做什么 |
 | --- | --- | --- | --- | --- | --- |
 | S4.1 | 用 `context.cron_manager.add_basic_job` 注册三班提醒 | job 名前缀 `ak_toolbox:shift_reminder:`；取不到 `cron_manager` 时明确降级或报错 | 任务出现在 AstrBot cron 列表，`get_next_run_time` 合理 | 服务器手动验证 | 不用 `add_active_job` |
-| S4.2 | 推送 | `await context.send_message(umo, chain)`，**检查返回值** | 返回 `False` 时计失败并写日志 | 单测（mock 返回 False） | 不做备用通道 |
+| S4.2 | 推送 | `await context.send_message(umo, chain)`，**检查返回值并捕获异常** | 返回 `False` **或抛异常**均计失败、写记录与日志（异常不得冒泡到调度层） | 单测（mock 返回 False 与 mock 抛异常各一条） | 不做备用通道 |
 | S4.3 | 幂等 | 同一班次同一时刻只推一次（KV 记 last_sent） | 重载/重复触发不重复推送 | 单测 + 服务器手动重载 | 不做补推 |
 | S4.4 | 失败熔断 | 连续失败达阈值暂停推送，成功后解除 | 阈值与恢复行为可单测 | 单测 | 不做外部告警 |
 | S4.5 | `terminate()` 清理 | 按前缀 `delete_job` + 取消后台任务 | 停用插件后无孤儿任务 | 服务器手动验证 | — |
