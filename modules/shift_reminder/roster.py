@@ -328,7 +328,7 @@ def describe_duration_hint(roster: Mapping[str, Any] | None) -> str:
             rhythm = " / ".join(_format_minutes(item) for item in readable)
             total = _format_minutes(sum(readable))
             return (
-                f"从名字里读出了节奏：{rhythm}，但合计 {total} 不是 24 小时，"
+                f"从名字里读出了节奏：{rhythm}，但合计 {total}，不是 24 小时，"
                 "所以没有采用——班次时刻请自己设置。"
             )
         return "这份排班表的名字里没有可用的时长信息，班次时刻请照旧自己设置。"
