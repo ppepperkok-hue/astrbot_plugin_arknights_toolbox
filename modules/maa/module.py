@@ -47,8 +47,11 @@ COMMAND_NAMES = ("maa",)
 
 PLUGIN_NAME = "astrbot_plugin_arknights_toolbox"
 
-#: 两个端点在本插件路由前缀下的路径。**必须带插件名前缀**，否则 Dashboard 的
-#: 转发匹配不到（`/api/v1/plugins/extensions/<plugin>/<这里>`）。
+#: 两个端点在本插件路由前缀下的路径。**必须带插件名前缀**：Dashboard 注册的路由
+#: 本身就是 `/<插件名>/<子路径>`，所以最终外部 URL 是
+#: `/api/v1/plugins/extensions/<插件名>/maa/getTask` —— **插件名只出现一次**。
+#: 写成两遍（`.../extensions/<插件名>/<插件名>/maa/getTask`）**匹配不上**，
+#: 已在本机用 AstrBot 的路由匹配函数实测确认。
 WEB_ROUTE_PREFIX = f"/{PLUGIN_NAME}/maa"
 
 #: 面板 API Key 的查询参数名。已核实 AstrBot 4.28.1 的

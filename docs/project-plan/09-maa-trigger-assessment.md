@@ -320,9 +320,27 @@ D:\mrfzmma\MAA.dll      ProductVersion = v6.18.0+23feeddc...
 - 插件用 `register_web_api` 注册的路由，挂在
   `/api/v1/plugins/extensions/<插件名>/<路由>`，**每一个 HTTP 方法都带
   `Depends(require_plugin_scope)`** —— 即**需要面板认证**。
-  （今晚早先的探测也印证过：不带 key 打过去是 401，不是 404。）
 - 但 `dashboard/api/auth.py:_extract_raw_api_key` **接受四种形态**：
-  `Authorization: Bearer <key>`、`?api_key=<key>`、`?key=<key>`、`X-API-Key`。
+  `?api_key=<key>`、`?key=<key>`、`X-API-Key:`、`Authorization: ApiKey <key>`。
+  ⚠️ **`Authorization: Bearer <key>` 不可用**：代码遇到 `Bearer ` 前缀显式返回
+  `None`（那条路走的是面板 JWT，不是 API Key）。首版报告把 `Bearer` 列为可用形态是**错的**。
+
+**⚠️ 一处已作废的判据（记下来，免得后人再用）**：首版报告写过「不带 key 打过去是
+401 而不是 404，所以路由存在」。**这条不成立**——后来跑了对照，**连确定不存在的
+路径也返回 401**，因为整个 `/api/v1/plugins/extensions/{plugin_path:path}` 前缀都在
+鉴权依赖之后，**鉴权先于路由判定**。这与本项目已记过的「`OPTIONS` 对任意路径都返回
+200」是**同一类假判据**。可靠的判据是**读源码 + 调用真实路由匹配函数**：
+
+```
+MATCH     .../astrbot_plugin_arknights_toolbox/maa/getTask
+no match  .../astrbot_plugin_arknights_toolbox/astrbot_plugin_arknights_toolbox/maa/getTask
+no match  路径写错 / 方法写错
+```
+
+⇒ **URL 里插件名只出现一次**（注册的路由本身已含 `/<插件名>/`，写两遍不通）。
+拿到合法 Key 后，**路径写错不会 404**，而是 HTTP 200 +
+`{"status":"error","message":"未找到该路由","data":{}}` —— 这是「请求到了但没路由到
+插件」与「根本没连上」的唯一区分手段。
 
 ⇒ **MAA 只能填一个普通 URL、没法带自定义请求头，所以「查询串」是它唯一能携带凭据的形态。**
 本模块据此在文案里写明：两个 URL 都要带 `?api_key=<面板 API Key>`。
