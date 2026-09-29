@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 from astrbot.api import logger
 from astrbot.api.event import MessageChain
-from astrbot.api.web import error_response, json_response, request
+from astrbot.api.web import PluginUploadFile, error_response, json_response, request
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
 # 两种运行场景的导入差异：
@@ -43,6 +43,12 @@ UMO_KEY = "bound_umo"
 ROSTER_KEY = "imported_roster"
 # 页面后端路由前缀：按规范必须带插件名（docs/architecture/rules.md §5）。
 WEB_ROUTE_PREFIX = f"/{PLUGIN_NAME}/shift-reminder"
+# 页面上传的排班表一律落成这个**固定名**：上传者给的文件名是伪造输入，绝不参与
+# 路径拼接（既定文件名的做法会让 `../../x` 之类的名字有可乘之机）。
+UPLOAD_FILENAME = "uploaded_schedule.json"
+# 上传体积上限。真实排班表 15~30 KB，2 MB 是给足了余量的防御性上限——
+# 目的不是"够用就行"，而是别让人拿一个几百 MB 的文件把内存撑爆。
+MAX_UPLOAD_BYTES = 2 * 1024 * 1024
 DEFAULT_TIMEZONE = "Asia/Shanghai"
 TIMEZONE_KEY = "timezone"
 SHIFT_SLOTS = (1, 2, 3)
@@ -681,6 +687,18 @@ class ShiftReminderModule(Module):
             ["GET"],
             "基建换班提醒状态",
         )
+        register(
+            f"{WEB_ROUTE_PREFIX}/roster",
+            self._web_roster,
+            ["GET"],
+            "已导入的排班表全貌",
+        )
+        register(
+            f"{WEB_ROUTE_PREFIX}/upload",
+            self._web_upload,
+            ["POST"],
+            "上传排班表 JSON",
+        )
 
     async def _web_status(self) -> Any:
         """只读状态：当前班次、下一班倒计时、绑定目标、最近发送记录。
@@ -719,3 +737,100 @@ class ShiftReminderModule(Module):
             shift_order=self._shift_order,
         )
         return json_response(payload)
+
+    async def _web_roster(self) -> Any:
+        """已导入排班表的**全貌**（含被标为「不动」的房间）。
+
+        与提醒消息的取舍刻意不同：提醒里不渲染「不动」的房间（那是给用户的**指令**，
+        让用户去改一间标明不要动的房就是错误信息）；页面上必须显示（那是给用户看的
+        **全貌**，藏起来用户会以为我们读漏了）。同一个数据，两种用途。
+
+        组装全在 `webapi.roster_view`（纯逻辑、有单测）。
+        """
+        if self._store is None:
+            return error_response("换班提醒模块尚未初始化完成，请稍后重试", status_code=503)
+        return json_response(webapi.roster_view(self._store.get(ROSTER_KEY)))
+
+    async def _web_upload(self) -> Any:
+        """接收页面传来的排班表 JSON 并导入。
+
+        安全要点（三条都是硬性的，见任务包约束）：
+
+        1. **绝不使用上传者提供的文件名落盘**——那是伪造输入。一律落成固定名
+           :data:`UPLOAD_FILENAME`，用户叫什么都与磁盘无关。
+        2. **先读进内存校验、合法了才写盘**——避免把脏文件留在数据目录里；体积也在这
+           一步用「多读一个字节」的方式卡住（不依赖 `content-length`，那可以被伪造，
+           也可能缺失）。
+        3. **路径不来自用户**——目标路径由 `self._data_dir` 与固定名拼成，
+           没有任何用户输入参与拼接。
+
+        解析失败返回 400 并带上解析器的原因（不是 500）——用户需要知道哪里不对。
+        """
+        data_dir, store = self._data_dir, self._store
+        if data_dir is None or store is None:
+            return error_response("换班提醒模块尚未初始化完成，请稍后重试", status_code=503)
+
+        try:
+            files = await request.files()
+        except Exception as exc:  # noqa: BLE001 - 上传解析失败要给用户明确原因
+            logger.warning("[ak_toolbox][shift_reminder] 读取上传内容失败：%s", exc)
+            return error_response(f"读取上传内容失败：{exc}", status_code=400)
+
+        upload = files.get("file")
+        if not isinstance(upload, PluginUploadFile):
+            return error_response("没有收到文件（表单字段名应为 file）", status_code=400)
+
+        try:
+            raw = await upload.read(MAX_UPLOAD_BYTES + 1)
+        except Exception as exc:  # noqa: BLE001 - 同上
+            logger.warning("[ak_toolbox][shift_reminder] 读取上传文件失败：%s", exc)
+            return error_response(f"读取上传文件失败：{exc}", status_code=400)
+
+        if len(raw) > MAX_UPLOAD_BYTES:
+            return error_response(
+                f"文件太大：上限 {MAX_UPLOAD_BYTES // 1024} KB，排班表通常只有几十 KB。",
+                status_code=413,
+            )
+        if not raw:
+            return error_response("文件是空的。", status_code=400)
+
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return error_response("文件不是 UTF-8 编码的文本，无法解析。", status_code=400)
+
+        # 去掉 BOM：Windows 上用记事本另存 JSON 很容易带上它，而 json.loads 见到
+        # 开头那个 \ufeff 会直接报错——用户看到的就是「文件格式不对」，很难自查。
+        text = text.lstrip("\ufeff")
+
+        try:
+            imported = roster.build_roster(
+                parse_schedule_file(text),
+                source=UPLOAD_FILENAME,
+                imported_at=self._now(),
+            )
+        except (ScheduleFileError, roster.RosterImportError) as exc:
+            logger.warning("[ak_toolbox][shift_reminder] 页面上传的排班表无法导入：%s", exc)
+            return error_response(f"导入失败：{exc}", status_code=400)
+
+        target = data_dir / UPLOAD_FILENAME
+        try:
+            target.write_bytes(raw)
+        except OSError as exc:
+            logger.warning("[ak_toolbox][shift_reminder] 保存上传的排班表失败：%s", exc)
+            return error_response(f"保存文件失败：{exc}", status_code=500)
+
+        store.set(ROSTER_KEY, imported)
+        logger.info(
+            "[ak_toolbox][shift_reminder] 页面已上传排班表（%d 字节，%d 个班次）",
+            len(raw),
+            imported.get("shift_count", 0),
+        )
+        return json_response(
+            {
+                "saved": True,
+                "filename": UPLOAD_FILENAME,
+                # 与 /ak import 的回执同口径，用户两处看到的数字一致。
+                "summary": roster.describe_roster(imported),
+            }
+        )

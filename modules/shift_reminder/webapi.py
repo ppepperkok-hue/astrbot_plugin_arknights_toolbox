@@ -9,10 +9,11 @@
 纯逻辑模块：**禁止 import astrbot**（由 ruff.toml 的 TID 禁入规则强制）。
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
+from .roster import ROOM_LABELS
 from .schedule import Shift, format_hhmm
 from .strategy import Snapshot
 
@@ -154,4 +155,93 @@ def build_status(
             for slot, shift in enumerate(slots, start=1)
         ],
         "recent": [record_brief(item) for item in recent],
+    }
+
+
+def _room_view(room: Mapping[str, Any]) -> dict[str, Any] | None:
+    """把落盘的一个房间条目转成展示结构；形状不可用时返回 None。"""
+    room_key = str(room.get("room", ""))
+    names = room.get("operators")
+    if not isinstance(names, Sequence) or isinstance(names, (str, bytes)):
+        operators: list[str] = []
+    else:
+        operators = [name for name in names if isinstance(name, str) and name.strip()]
+
+    index = room.get("index")
+    label = ROOM_LABELS.get(room_key, room_key)
+    return {
+        "room": room_key,
+        "label": label,
+        "index": index if isinstance(index, int) else None,
+        "where": f"{label}{index}" if isinstance(index, int) else label,
+        "operators": operators,
+        # 「不动」的房间在这里**照实保留并标注**。注意与提醒消息的取舍刻意不同：
+        # 提醒里不渲染它们（那是给用户的**指令**，让用户去改一间标明不要动的房
+        # 就是错误信息）；而页面上必须显示（那是给用户看的**全貌**，藏起来用户
+        # 会以为我们读漏了）。同一个数据，两种用途，取舍不同。
+        "skipped": bool(room.get("skipped")),
+    }
+
+
+def roster_view(roster: Mapping[str, Any] | None) -> dict[str, Any]:
+    """把落盘的排班表转成页面展示结构（纯逻辑，不读文件、不调时间）。
+
+    未导入、形状不对、或结构不完整时返回 ``{"imported": False}``——页面据此显示
+    上传引导，而不是空白。**绝不为了「看起来有数据」而编造结构**。
+
+    Args:
+        roster: ``JsonStateStore`` 里 ``imported_roster`` 键的值，或 None。
+
+    Returns:
+        可 JSON 序列化的 dict。已导入时含 ``source`` / ``imported_at`` /
+        ``shift_count`` / ``skipped_total`` 与逐班逐房的明细。
+    """
+    if not isinstance(roster, Mapping):
+        return {"imported": False}
+
+    shifts_raw = roster.get("shifts")
+    if not isinstance(shifts_raw, Sequence) or isinstance(shifts_raw, (str, bytes)):
+        return {"imported": False}
+
+    shifts: list[dict[str, Any]] = []
+    skipped_total = 0
+    for position, item in enumerate(shifts_raw, start=1):
+        if not isinstance(item, Mapping):
+            continue
+        rooms_raw = item.get("rooms")
+        if not isinstance(rooms_raw, Sequence) or isinstance(rooms_raw, (str, bytes)):
+            rooms_raw = []
+
+        rooms: list[dict[str, Any]] = []
+        for room in rooms_raw:
+            if not isinstance(room, Mapping):
+                continue
+            view = _room_view(room)
+            if view is None:
+                continue
+            if view["skipped"]:
+                skipped_total += 1
+            rooms.append(view)
+
+        plan_index = item.get("plan_index")
+        if not isinstance(plan_index, int):
+            plan_index = position
+        shifts.append(
+            {
+                "plan_index": plan_index,
+                "plan_name": str(item.get("plan_name", "")) or f"第 {plan_index} 班",
+                "rooms": rooms,
+                "room_count": len(rooms),
+                "operator_count": sum(len(room["operators"]) for room in rooms),
+                "skipped_count": sum(1 for room in rooms if room["skipped"]),
+            }
+        )
+
+    return {
+        "imported": True,
+        "source": str(roster.get("source", "")),
+        "imported_at": str(roster.get("imported_at", "")),
+        "shift_count": len(shifts),
+        "skipped_total": skipped_total,
+        "shifts": shifts,
     }

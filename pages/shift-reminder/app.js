@@ -14,6 +14,8 @@ const MIN_SHIFT_MINUTES = 60;
 const HOUR = 60;
 
 const ENDPOINT = "shift-reminder/status";
+const ROSTER_ENDPOINT = "shift-reminder/roster";
+const UPLOAD_ENDPOINT = "shift-reminder/upload";
 const REFRESH_INTERVAL_MS = 60_000;
 const COUNTDOWN_INTERVAL_MS = 1_000;
 
@@ -649,6 +651,132 @@ function render(payload) {
   setText("status-line", `读取时间 ${String(data.now || "").replace("T", " ").slice(0, 19)}`);
 }
 
+function renderRoster(view) {
+  const host = byId("roster-detail");
+  if (!host) {
+    return;
+  }
+  host.textContent = "";
+
+  if (!view || view.imported !== true) {
+    const p = document.createElement("p");
+    p.className = "muted";
+    p.textContent =
+      "还没有导入排班表。在上面选一个导出的 JSON 上传就行——不导入也能正常用，" +
+      "只是提醒里不会列出干员。";
+    host.append(p);
+    return;
+  }
+
+  const head = document.createElement("p");
+  head.className = "muted";
+  const parts = [`共 ${view.shift_count} 个班次`];
+  if (view.source) {
+    parts.push(`来源 ${view.source}`);
+  }
+  if (view.imported_at) {
+    parts.push(`导入于 ${String(view.imported_at).replace("T", " ").slice(0, 16)}`);
+  }
+  if (view.skipped_total) {
+    parts.push(`${view.skipped_total} 间标了「不动」`);
+  }
+  head.textContent = parts.join(" · ");
+  host.append(head);
+
+  (view.shifts || []).forEach((shift) => {
+    const block = document.createElement("div");
+    block.className = "roster-shift";
+
+    const title = document.createElement("h3");
+    title.textContent = `第 ${shift.plan_index} 班　${shift.plan_name}`;
+    block.append(title);
+
+    const meta = document.createElement("p");
+    meta.className = "muted";
+    meta.textContent = `${shift.room_count} 个房间、${shift.operator_count} 位干员`;
+    block.append(meta);
+
+    const list = document.createElement("ul");
+    list.className = "roster-rooms";
+    (shift.rooms || []).forEach((room) => {
+      const li = document.createElement("li");
+      if (room.skipped) {
+        li.classList.add("skipped");
+      }
+
+      const where = document.createElement("span");
+      where.className = "where";
+      where.textContent = room.where || room.label || room.room || "?";
+      li.append(where);
+
+      const who = document.createElement("span");
+      who.className = "who";
+      who.textContent = (room.operators || []).join("、") || "（无）";
+      li.append(who);
+
+      if (room.skipped) {
+        const tag = document.createElement("span");
+        tag.className = "tag";
+        // 页面上必须显示这些房间并标注——藏起来用户会以为我们读漏了。
+        // 提醒消息里相反：那里不渲染它们，因为那是给用户的「指令」，
+        // 让用户去换一间排班表标明不要动的房就是错误信息。
+        tag.textContent = "不动";
+        li.append(tag);
+      }
+      list.append(li);
+    });
+    block.append(list);
+    host.append(block);
+  });
+}
+
+async function loadRoster() {
+  try {
+    const view = await window.AstrBotPluginPage.apiGet(ROSTER_ENDPOINT);
+    renderRoster(normalize(view));
+  } catch (error) {
+    console.error("读取排班表失败", error);
+    renderRoster(null);
+  }
+}
+
+async function uploadRoster() {
+  const input = byId("roster-file");
+  const button = byId("roster-upload");
+  const file = input && input.files && input.files[0];
+  if (!file) {
+    setText("upload-hint", "先选一个 .json 文件再点上传。");
+    return;
+  }
+
+  if (button) {
+    button.disabled = true;
+  }
+  setText("upload-hint", "正在上传…");
+  try {
+    // 用 multipart 上传：后端读的是 request.files()，只有 FormData 能产生它。
+    const form = new FormData();
+    form.append("file", file);
+    const result = normalize(await window.AstrBotPluginPage.apiPost(UPLOAD_ENDPOINT, form));
+    if (result && result.saved) {
+      setText("upload-hint", `导入成功。${result.summary || ""}`.trim());
+      input.value = "";
+      await loadRoster();
+      await refresh();
+    } else {
+      const reason = (result && result.error) || "后端没有返回成功标记";
+      setText("upload-hint", `导入失败：${reason}`);
+    }
+  } catch (error) {
+    console.error("上传失败", error);
+    setText("upload-hint", `上传失败：${error && error.message ? error.message : error}`);
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
+}
+
 async function refresh() {
   const button = byId("refresh");
   if (button) {
@@ -685,8 +813,10 @@ async function main() {
     }
   });
   byId("lead-input")?.addEventListener("input", renderLeadHint);
+  byId("roster-upload")?.addEventListener("click", uploadRoster);
 
   await refresh();
+  await loadRoster();
 
   countdownTimer = window.setInterval(renderCountdown, COUNTDOWN_INTERVAL_MS);
   window.setInterval(refresh, REFRESH_INTERVAL_MS);

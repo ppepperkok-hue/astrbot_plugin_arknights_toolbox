@@ -76,6 +76,28 @@
       </section>
 
       <section class="card">
+        <h2>排班表</h2>
+        <p class="muted">
+          上传一份基建排班表（<a href="https://riic.autos/" target="_blank" rel="noreferrer">riic.autos</a>
+          导出、MAA 能导入的那种 JSON），提醒里就会带上「这一班哪个房间该上谁」。
+          不导入也能正常用，只是提醒里不会列出干员。
+        </p>
+
+        <div class="upload-row">
+          <input
+            id="roster-file"
+            type="file"
+            accept=".json,application/json"
+            aria-label="选择排班表 JSON 文件"
+          />
+          <button id="roster-upload" type="button">上传并导入</button>
+        </div>
+        <p id="upload-hint" class="muted"></p>
+
+        <div id="roster-detail" class="roster"></div>
+      </section>
+
+      <section class="card">
         <h2>最近发送</h2>
         <ul id="recent" class="recent">
           <li class="muted">—</li>

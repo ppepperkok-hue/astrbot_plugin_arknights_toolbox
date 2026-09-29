@@ -11,8 +11,11 @@ import json
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+from astrbot.api.web import PluginUploadFile
+
 from core.storage import SendRecord
 from modules.shift_reminder import module as reminder_module
+from modules.shift_reminder import webapi
 from modules.shift_reminder.schedule import Shift, validate
 from modules.shift_reminder.strategy import PeriodStrategy
 from modules.shift_reminder.webapi import (
@@ -293,15 +296,19 @@ def _boot(tmp_path, monkeypatch) -> tuple[object, list[tuple]]:
     return instance, registered
 
 
-def test_initialize_registers_the_status_route(tmp_path, monkeypatch) -> None:
-    """路由必须带插件名前缀，否则 Dashboard 转发不到（rules.md §5）。"""
+def test_initialize_registers_the_expected_routes(tmp_path, monkeypatch) -> None:
+    """路由必须带插件名前缀，否则 Dashboard 转发不到（rules.md §5）。
+
+    三条路由各司其职，且方法不能串：状态与排班表是只读 GET，上传是 POST。
+    """
     instance, registered = _boot(tmp_path, monkeypatch)
 
-    assert len(registered) == 1
-    route, handler, methods, _desc = registered[0]
-    assert route == "/astrbot_plugin_arknights_toolbox/shift-reminder/status"
-    assert methods == ["GET"]
-    assert handler == instance._web_status
+    by_route = {route: (handler, methods) for route, handler, methods, _desc in registered}
+    prefix = "/astrbot_plugin_arknights_toolbox/shift-reminder"
+    assert set(by_route) == {f"{prefix}/status", f"{prefix}/roster", f"{prefix}/upload"}
+    assert by_route[f"{prefix}/status"] == (instance._web_status, ["GET"])
+    assert by_route[f"{prefix}/roster"] == (instance._web_roster, ["GET"])
+    assert by_route[f"{prefix}/upload"] == (instance._web_upload, ["POST"])
 
 
 def test_web_status_returns_serializable_payload(tmp_path, monkeypatch) -> None:
@@ -338,3 +345,268 @@ def test_register_web_api_absent_degrades_loudly(monkeypatch) -> None:
     reminder_module.ShiftReminderModule()._register_web_api(SimpleNamespace())
 
     assert any("register_web_api" in message for message in messages)
+
+
+# --- roster_view：把落盘的排班表翻译成页面展示结构 ---------------------------
+
+
+def _roster_sample() -> dict:
+    """一份带「不动」房间的排班表，形状与 `roster.build_roster` 的产物一致。"""
+    return {
+        "source": "sample.json",
+        "imported_at": "2026-09-29T02:46:36+08:00",
+        "shift_count": 2,
+        "shifts": [
+            {
+                "plan_index": 1,
+                "plan_name": "第一班",
+                "rooms": [
+                    {
+                        "room": "trading",
+                        "index": 1,
+                        "operators": ["黑键", "吉星"],
+                        "skipped": False,
+                    },
+                    {"room": "dormitory", "index": 1, "operators": ["夜莺"], "skipped": True},
+                ],
+            },
+            {
+                "plan_index": 2,
+                "plan_name": "第二班",
+                "rooms": [
+                    {"room": "manufacture", "index": 3, "operators": [], "skipped": False},
+                ],
+            },
+        ],
+    }
+
+
+def test_roster_view_reports_not_imported_for_missing_roster() -> None:
+    """没导入过时给 `imported: False`，页面据此显示上传引导——不是空白。"""
+    assert webapi.roster_view(None) == {"imported": False}
+
+
+def test_roster_view_reports_not_imported_for_wrong_shape() -> None:
+    """形状不对时同样按「未导入」处理，绝不为了看起来有数据而编造结构。"""
+    assert webapi.roster_view({"shifts": "不是列表"}) == {"imported": False}
+    assert webapi.roster_view({}) == {"imported": False}
+
+
+def test_roster_view_keeps_and_flags_skipped_rooms() -> None:
+    """**本包最要紧的一条取舍**：页面上必须显示「不动」的房间并标注。
+
+    与提醒消息刻意不同——提醒里不渲染（那是给用户的指令，让用户去改一间标明
+    不要动的房就是错误信息）；页面上必须显示（那是给用户看的全貌，藏起来用户
+    会以为我们读漏了）。
+    """
+    view = webapi.roster_view(_roster_sample())
+
+    assert view["imported"] is True
+    assert view["skipped_total"] == 1
+
+    first = view["shifts"][0]
+    assert [room["skipped"] for room in first["rooms"]] == [False, True]
+    # 被标记的那间房**没有被丢掉**，而且干员名照实保留
+    dorm = first["rooms"][1]
+    assert dorm["room"] == "dormitory"
+    assert dorm["label"] == "宿舍"
+    assert dorm["operators"] == ["夜莺"]
+    assert first["skipped_count"] == 1
+
+
+def test_roster_view_counts_and_labels() -> None:
+    """计数与中文房型名要正确——用户就是靠这些数字判断「读进去没有」。"""
+    view = webapi.roster_view(_roster_sample())
+
+    assert view["source"] == "sample.json"
+    assert view["shift_count"] == 2
+
+    first = view["shifts"][0]
+    assert first["room_count"] == 2
+    assert first["operator_count"] == 3  # 黑键、吉星、夜莺（含 skipped 房间的人）
+    assert first["rooms"][0]["where"] == "贸易站1"
+
+    second = view["shifts"][1]
+    assert second["rooms"][0]["where"] == "制造站3"
+    assert second["operator_count"] == 0
+
+
+def test_roster_view_survives_dirty_entries() -> None:
+    """脏条目不能让整张表作废：过滤掉非 Mapping 与非字符串干员名。"""
+    dirty = {
+        "shifts": [
+            {
+                "plan_index": 1,
+                "plan_name": "第一班",
+                "rooms": [
+                    "不是对象",
+                    {"room": "trading", "index": 1, "operators": ["黑键", "", None, 42]},
+                ],
+            }
+        ]
+    }
+    view = webapi.roster_view(dirty)
+
+    rooms = view["shifts"][0]["rooms"]
+    assert len(rooms) == 1
+    assert rooms[0]["operators"] == ["黑键"]
+
+
+# --- 上传 handler ----------------------------------------------------------
+#
+# 上传成功路径依赖 AstrBot 的 multipart 解析，本机没有框架运行时、测不了真实
+# 上传。这里用 stub 顶住 `request.files()`，覆盖**装配层自己的逻辑**：固定文件名、
+# 体积上限、内容校验、错误码。真实上传留服务器验收。
+
+
+def _schedule_json() -> bytes:
+    """一份结构合法的最小排班表（3 班，与解析器的要求一致）。"""
+    payload = {
+        "plans": [
+            {
+                "name": f"第 {i} 班",
+                "rooms": {
+                    "trading": [{"operators": ["黑键"], "skip": False}],
+                },
+            }
+            for i in (1, 2, 3)
+        ]
+    }
+    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
+def _patch_upload(monkeypatch, *uploads) -> None:
+    """把 `request.files()` 换成返回给定的上传文件（键名 file）。"""
+
+    async def _files() -> dict:
+        return {"file": uploads[0]} if len(uploads) == 1 else {}
+
+    monkeypatch.setattr(reminder_module.request, "files", _files)
+
+
+def test_web_upload_refuses_before_initialize() -> None:
+    """没初始化就上传要先说清楚，而不是抛 AttributeError 给用户看。"""
+    payload = asyncio.run(reminder_module.ShiftReminderModule()._web_upload())
+
+    assert payload["status_code"] == 503
+
+
+def test_web_upload_rejects_when_no_file(tmp_path, monkeypatch) -> None:
+    """没带文件时必须明确说字段名，而不是含糊的「失败」。"""
+    instance, _ = _boot(tmp_path, monkeypatch)
+    _patch_upload(monkeypatch)
+
+    payload = asyncio.run(instance._web_upload())
+
+    assert payload["status_code"] == 400
+    assert "file" in payload["error"]
+
+
+def test_web_upload_uses_a_fixed_filename_not_the_supplied_one(tmp_path, monkeypatch) -> None:
+    """**本包的安全核心**：上传者给什么文件名都无所谓，落盘一律用固定名。
+
+    防的是「文件名即输入」——`../../evil.json` 一旦参与路径拼接，就能写到数据
+    目录之外。这里断言恶意名字**没有**被用于任何落盘路径。
+    """
+    instance, _ = _boot(tmp_path, monkeypatch)
+    _patch_upload(monkeypatch, PluginUploadFile(_schedule_json(), filename="../../evil.json"))
+
+    payload = asyncio.run(instance._web_upload())
+
+    assert payload["saved"] is True
+    assert payload["filename"] == reminder_module.UPLOAD_FILENAME
+    # 落盘位置由 self._data_dir 决定（插件数据目录），不是上传者说了算
+    assert (instance._data_dir / reminder_module.UPLOAD_FILENAME).is_file()
+    assert not (tmp_path.parent / "evil.json").exists()
+    # 回执与 /ak import 同口径：带得出数字
+    assert "班次" in payload["summary"]
+
+
+def test_web_upload_records_the_roster_in_the_store(tmp_path, monkeypatch) -> None:
+    """导入成功必须真的落进 `ROSTER_KEY`，否则页面显示"已导入"却没有内容。"""
+    instance, _ = _boot(tmp_path, monkeypatch)
+    _patch_upload(monkeypatch, PluginUploadFile(_schedule_json()))
+
+    asyncio.run(instance._web_upload())
+
+    stored = instance._store.get(reminder_module.ROSTER_KEY)
+    assert stored is not None
+    assert stored["shift_count"] == 3
+
+
+def test_web_upload_rejects_oversized_payload(tmp_path, monkeypatch) -> None:
+    """体积上限要能挡住——不是"够用就行"，是别让大文件把内存撑爆。"""
+    instance, _ = _boot(tmp_path, monkeypatch)
+    oversized = b"x" * (reminder_module.MAX_UPLOAD_BYTES + 1)
+    _patch_upload(monkeypatch, PluginUploadFile(oversized))
+
+    payload = asyncio.run(instance._web_upload())
+
+    assert payload["status_code"] == 413
+    assert "太大" in payload["error"]
+
+
+def test_web_upload_rejects_empty_file(tmp_path, monkeypatch) -> None:
+    instance, _ = _boot(tmp_path, monkeypatch)
+    _patch_upload(monkeypatch, PluginUploadFile(b""))
+
+    payload = asyncio.run(instance._web_upload())
+
+    assert payload["status_code"] == 400
+
+
+def test_web_upload_reports_parser_error_not_500(tmp_path, monkeypatch) -> None:
+    """坏 JSON 要带出解析器的原因、返回 400——不是 500 让用户面对"服务器错误"。"""
+    instance, _ = _boot(tmp_path, monkeypatch)
+    _patch_upload(monkeypatch, PluginUploadFile(b'{"plans": "not a list"}'))
+
+    payload = asyncio.run(instance._web_upload())
+
+    assert payload["status_code"] == 400
+    assert "导入失败" in payload["error"]
+
+
+def test_web_upload_rejects_non_utf8(tmp_path, monkeypatch) -> None:
+    instance, _ = _boot(tmp_path, monkeypatch)
+    _patch_upload(monkeypatch, PluginUploadFile(b"\xff\xfe\x00\x01"))
+
+    payload = asyncio.run(instance._web_upload())
+
+    assert payload["status_code"] == 400
+    assert "UTF-8" in payload["error"]
+
+
+def test_web_upload_tolerates_a_utf8_bom(tmp_path, monkeypatch) -> None:
+    """带 BOM 的 UTF-8 要能导入。
+
+    这不罕见：Windows 记事本另存 JSON 会带 BOM，而 `json.loads` 见到开头的
+    `\\ufeff` 直接报错——用户看到「格式不对」根本猜不到是这个原因。
+    """
+    instance, _ = _boot(tmp_path, monkeypatch)
+    _patch_upload(monkeypatch, PluginUploadFile(b"\xef\xbb\xbf" + _schedule_json()))
+
+    payload = asyncio.run(instance._web_upload())
+
+    assert payload["saved"] is True, payload
+
+
+def test_web_roster_returns_view_of_stored_roster(tmp_path, monkeypatch) -> None:
+    """页面查询走的是同一份落盘数据，不该另算一套。"""
+    instance, _ = _boot(tmp_path, monkeypatch)
+    _patch_upload(monkeypatch, PluginUploadFile(_schedule_json()))
+    asyncio.run(instance._web_upload())
+
+    payload = asyncio.run(instance._web_roster())
+
+    assert payload["imported"] is True
+    assert payload["shift_count"] == 3
+    assert payload["shifts"][0]["rooms"][0]["label"] == "贸易站"
+
+
+def test_web_roster_before_import_shows_not_imported(tmp_path, monkeypatch) -> None:
+    """未导入时给 False，页面据此显示上传引导。"""
+    instance, _ = _boot(tmp_path, monkeypatch)
+
+    payload = asyncio.run(instance._web_roster())
+
+    assert payload == {"imported": False}

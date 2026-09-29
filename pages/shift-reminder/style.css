@@ -163,6 +163,86 @@ button.small {
   font-size: 13px;
 }
 
+/* --- 排班表：上传 + 全貌 --------------------------------------------------- */
+
+.upload-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 10px 0 6px;
+}
+
+.upload-row input[type="file"] {
+  flex: 1 1 220px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--fg);
+}
+
+.roster {
+  margin-top: 10px;
+}
+
+.roster-shift {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.roster-shift h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+
+.roster-rooms {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.roster-rooms li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+/* 「不动」的房间照实显示，但一眼能看出它们不会被写进提醒。 */
+.roster-rooms li.skipped {
+  opacity: 0.72;
+  text-decoration: line-through;
+  text-decoration-color: var(--muted);
+}
+
+.roster-rooms .where {
+  flex: 0 0 auto;
+  min-width: 5em;
+  color: var(--muted);
+}
+
+.roster-rooms .who {
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.roster-rooms .tag {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  text-decoration: none;
+}
+
 code {
   background: rgba(127, 127, 127, 0.16);
   padding: 1px 5px;

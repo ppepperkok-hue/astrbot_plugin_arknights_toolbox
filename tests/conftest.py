@@ -97,17 +97,43 @@ def _install_astrbot_stub() -> None:
         def get(self, key: str, default: Any = None) -> Any:
             return default
 
+    class PluginUploadFile:
+        """够用的上传文件占位：只保留 `read`、`filename` 与体积信息。
+
+        真实的 `PluginUploadFile` 由 AstrBot 包装 Starlette 的上传对象；这里只实现
+        装配层用到的部分（`read()` 读字节 + `read(size)` 截断，供体积上限判断）。
+        """
+
+        def __init__(self, data: bytes = b"", filename: str = "uploaded.json") -> None:
+            self._data = data
+            self.filename = filename
+            self.content_type = "application/json"
+            self.content_length = len(data)
+
+        async def read(self, size: int = -1) -> bytes:
+            return self._data if size < 0 else self._data[:size]
+
+    class _StubFiles(dict):
+        """够用的上传容器：`files.get("file")` 是装配层唯一的用法。"""
+
     class _StubRequest:
-        """够用的 request 代理：只补被 import 到的 `query` 与 `json`。
+        """够用的 request 代理：只补被 import 到的 `query` / `json` / `files`。
 
         `json()` 默认返回 `default`（等同空请求体）；需要给请求体的测试用
         `monkeypatch.setattr(_StubRequest, "json", ...)` 覆盖即可。
+        `files()` 同理，默认是**空的上传**——测试想模拟上传时 monkeypatch 它。
         """
 
         query = _StubQuery()
 
         async def json(self, default: Any = None) -> Any:
             return default
+
+        async def files(self) -> Any:
+            return _StubFiles()
+
+        async def form(self) -> Any:
+            return {}
 
     def get_astrbot_plugin_data_path() -> str:
         """默认给一个不会污染仓库的位置；需要时由测试 monkeypatch 覆盖。"""
@@ -129,6 +155,7 @@ def _install_astrbot_stub() -> None:
     web.json_response = json_response
     web.error_response = error_response
     web.request = _StubRequest()
+    web.PluginUploadFile = PluginUploadFile
     astrbot_path.get_astrbot_plugin_data_path = get_astrbot_plugin_data_path
 
     star = types.ModuleType("astrbot.api.star")
