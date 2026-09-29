@@ -805,7 +805,6 @@ def test_a_missing_cron_manager_degrades_loudly_without_killing_the_module(
     "config",
     [
         {"task_type": "NotATask"},
-        {"task_type": ""},
         {"task_type": "LinkStart-Combat"},
         {"task_ttl_minutes": 0},
         {"task_ttl_minutes": "30"},
@@ -813,7 +812,18 @@ def test_a_missing_cron_manager_degrades_loudly_without_killing_the_module(
     ],
 )
 def test_invalid_config_fails_loudly(monkeypatch, config) -> None:
-    """**不静默回落到默认值**：用户改了个错值却以为生效了，比直接报错糟得多。"""
+    """**不静默回落到默认值**：用户改了个错值却以为生效了，比直接报错糟得多。
+
+    ⚠️ **这条清单里原本还有 ``{"task_type": ""}``，2026-09-29 移出**——不是为了让
+    测试变绿而放宽，而是那条断言记的是**错的分类**：空串是"没设置"，不是"填错了"。
+    宿主要按 `_conf_schema.json` 的 `items` 逐项生成配置，而 `task_type` 那一项
+    当时**漏写了 `default`**，于是全新安装的默认配置里它就是空串 ⇒ 模块启动失败，
+    提示还在怪用户。回退行为改由
+    `tests/test_config_defaults.py::test_maa_empty_values_fall_back_to_defaults` 钉。
+
+    剩下的五条仍然都是**真的填错**（类型不对、越界、不在白名单），必须继续报错——
+    放宽这一条就是放宽整个校验，正是本项目最危险的改法。
+    """
     instance = maa_module.MaaModule()
 
     with pytest.raises(ValueError):

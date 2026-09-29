@@ -66,9 +66,11 @@ from astrbot.api.web import error_response, json_response, request
 #   * 从仓库根跑 pytest 时顶层包是 `modules`，`...` 会越界 → 必须用绝对导入。
 # 先绝对、失败再回退相对，注册表的自动发现才 import 得动它。
 try:  # pragma: no cover - 走哪支取决于运行场景，两支都是真实路径
+    from core.config import is_unset, setting
     from core.module import Module
     from core.permission import session_allowed
 except ImportError:  # pragma: no cover
+    from ...core.config import is_unset, setting
     from ...core.module import Module
     from ...core.permission import session_allowed
 
@@ -115,10 +117,19 @@ MAX_TTL_MINUTES = 7 * 24 * 60
 def _parse_minutes(config: Mapping[str, Any], key: str, default: int, *, what: str) -> int:
     """从配置里读一个「分钟数」。
 
+    **空值 ⇒ 回退默认值**（记一条 WARN）：宿主按 ``_conf_schema.json`` 的 ``items``
+    逐项生成配置，漏写 ``default`` 的那一项在全新安装后就是空串；空串不是"填错了"，
+    而是"没设置"，不该让整个模块起不来（2026-09-29 的线上复现：``task_type`` 空串
+    导致模块启动失败，提示还在怪用户填错）。
+
     **非法值一律抛错，不回落默认值**：用户改了个错值却以为生效了，比直接报错糟得多。
-    （`bool` 是 `int` 的子类，所以单独挡一下——`True` 不该被当成 1 分钟。）
+    （``bool`` 是 ``int`` 的子类，所以单独挡一下——``True`` 不该被当成 1 分钟。）
     """
-    raw = config.get(key, default)
+    if is_unset(config.get(key)):
+        logger.warning(
+            "[ak_toolbox][maa] 配置 %s 未设置（或为空），采用默认值 %d 分钟", key, default
+        )
+    raw = setting(config, key, default)
     if isinstance(raw, bool) or not isinstance(raw, int):
         raise ValueError(f"{what}必须是整数（分钟），收到 {raw!r}")
     if not 1 <= raw <= MAX_TTL_MINUTES:
@@ -127,8 +138,17 @@ def _parse_minutes(config: Mapping[str, Any], key: str, default: int, *, what: s
 
 
 def _parse_task_type(config: Mapping[str, Any]) -> str:
-    """读任务类型；非法值由 `tasks.coerce_task_type` 抛 `TaskTypeError`。"""
-    return tasks.coerce_task_type(config.get("task_type", tasks.DEFAULT_TASK_TYPE))
+    """读任务类型。
+
+    **空值 ⇒ 回退默认值**（同上，记 WARN）；**非法值**由 `tasks.coerce_task_type`
+    抛 `TaskTypeError`——``"NotATask"`` 这种是真的填错了，必须当场说出来。
+    """
+    if is_unset(config.get("task_type")):
+        logger.warning(
+            "[ak_toolbox][maa] 配置 task_type 未设置（或为空），采用默认值 %s",
+            tasks.DEFAULT_TASK_TYPE,
+        )
+    return tasks.coerce_task_type(setting(config, "task_type", tasks.DEFAULT_TASK_TYPE))
 
 
 def _header(name: str) -> str:
@@ -184,9 +204,12 @@ class MaaModule(Module):
     async def initialize(self, ctx: Any, config: Mapping[str, Any]) -> None:
         """读配置、建队列、注册两个端点与过期巡检。
 
-        配置非法**当场抛**：宿主会逐模块隔离失败、把原因记进清单并单列出来，
-        用户看得到「maa 没起来，因为任务类型写错了」。**不静默回落到默认值**——
-        那会让用户以为配置生效了。
+        **填错**的值当场抛：宿主会逐模块隔离失败、把原因记进清单并单列出来，
+        用户看得到「maa 没起来，因为任务类型写错了」。
+
+        **空值不算填错**，它等于"没设置"——宿主的默认配置里这一项就可能是个空串
+        （`_conf_schema.json` 的 `items` 漏写 `default` 时会这样），此时回退默认值
+        并记一条 WARN。判据与边界见 `core/config.py`。
         """
         self._task_type = _parse_task_type(config)
         task_ttl = _parse_minutes(

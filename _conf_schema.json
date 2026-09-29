@@ -175,6 +175,7 @@
       "task_type": {
         "type": "string",
         "description": "派什么任务",
+        "default": "LinkStart",
         "hint": "LinkStart = 跑一整套（一键长草，含基建、剿灭、收菜等，按你在 MAA 里勾选的那套）；LinkStart-Base = 只跑基建。默认 LinkStart。⚠️ 协议里没有班次字段，所以无论选哪个都只是「让它按自己的排班跑一次」，不能指定第几班。"
       },
       "task_ttl_minutes": {

@@ -23,6 +23,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 #     `modules`，此时 `...` 会越界 → 必须用 `core.*` 绝对导入。
 # 先绝对、失败再回退相对，两种场景都能工作；注册表的自动发现也才 import 得动它。
 try:  # pragma: no cover - 走哪支取决于运行场景，两支都是真实路径
+    from core.config import is_unset, setting
     from core.module import Module
     from core.permission import session_allowed
     from core.shifts import (
@@ -34,6 +35,7 @@ try:  # pragma: no cover - 走哪支取决于运行场景，两支都是真实�
     )
     from core.storage import JsonlSendLog, JsonStateStore, SendRecord
 except ImportError:  # pragma: no cover
+    from ...core.config import is_unset, setting
     from ...core.module import Module
     from ...core.permission import session_allowed
     from ...core.shifts import (
@@ -103,8 +105,18 @@ def parse_shift_order(config: Mapping[str, Any]) -> tuple[str, ...]:
 
 
 def parse_lead_minutes(config: Mapping[str, Any]) -> int:
-    """读取提前量；必须是 0 或正整数。"""
-    raw = config.get("lead_minutes", DEFAULT_LEAD_MINUTES)
+    """读取提前量；必须是 0 或正整数。
+
+    **空值 ⇒ 回退默认值**（记一条 WARN）：与 `parse_timezone` 同一条规则——
+    宿主按 schema 的 `items` 逐项生成配置，漏写 `default` 的项在全新安装后就是空串，
+    而"没设置"不该让整个模块起不来。**非法值（``-1``、``"10"``）仍当场报错。**
+    """
+    if is_unset(config.get("lead_minutes")):
+        logger.warning(
+            "[ak_toolbox][shift_reminder] 配置 lead_minutes 未设置（或为空），采用默认值 %d 分钟",
+            DEFAULT_LEAD_MINUTES,
+        )
+    raw = setting(config, "lead_minutes", DEFAULT_LEAD_MINUTES)
     if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
         raise ConfigError(f"lead_minutes 必须是非负整数，收到 {raw!r}")
     return raw

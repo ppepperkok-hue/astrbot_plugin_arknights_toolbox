@@ -430,3 +430,105 @@ README `:93-104` 给了五步分诊表，质量**很高**（先 `/ak test` 分�
 
 **本包未做**：没有 `git commit` / `git push` / `git tag`；没有改 `_conf_schema.json` 结构、`pages/**`、`modules/{shift_reminder,skland,maa}/**`（除 `recruit`）、`ruff.toml`、`docs/architecture/**`。
 
+---
+
+## 12. 全新安装实测发现（F8，2026-09-29）：空值会把模块打死
+
+> 本节点同样在报告**之后**追加。它记的不是审查发现的，而是**一次全新安装**（代码、配置、用户数据全部清空）**跑出来的**——属于"只有真装一遍才会现形"的那类问题。
+
+### 12.1 现场
+
+全新安装后，宿主按 `_conf_schema.json` 生成的默认配置里：
+
+```
+modules        = {"shift_reminder": true, "recruit": true, "skland": false, "maa": false}   ✓
+shift_1_name   = 第 1 班   shift_1_start = 08:00   shift_1_hours = 12   ✓
+shift_2/3_*    = 第 2/3 班  20:00·6h / 02:00·6h                          ✓
+timezone       = Asia/Shanghai     lead_minutes = 10                      ✓
+maa.task_type  = ''        ← 空串（schema 里写的是 "LinkStart"）
+```
+
+后果**已经发生过一次**：`maa` 模块启动失败，日志为
+
+```
+TaskTypeError: 任务类型配置不合法：''；当前可用：LinkStart、LinkStart-Base
+```
+
+**而提示在怪用户填错，他什么都没填。** 这正是下一个打开 `maa` 开关的用户会原样撞上的东西。
+
+### 12.2 真因（比"一处写漏"更值得记）
+
+**宿主是按 `items` 逐项生成配置的。** `maa` 段里：
+
+- `task_ttl_minutes` / `fetched_ttl_minutes` 的 **`items` 级**有 `default` → 生成后正常；
+- `task_type` 的 **`items` 级漏写了 `default`**，段级 `default` 里的 `"LinkStart"` **不生效** → 生成后是空串。
+
+⇒ 这是一个**模式**：**任何 `items` 条目漏写 `default`，那一项在全新安装后都会是空串。**
+所以本包做了两层护栏（见 12.5），而不是只补一行。
+
+### 12.3 规则与边界
+
+**「用户没动过这一项」与「用户明确填了空」在配置里长得一模一样**，而这两者的正确行为都是**用默认值**——一个空的任务类型、空的提前量都没有意义。
+
+**但空 ≠ 填错。** 边界钉死在两处：
+
+| 情形 | 行为 |
+| --- | --- |
+| 键缺失 / `None` / 空串 / 只有空白 | **回退默认值**，并记一条 WARN（不静默） |
+| 类型不对（`"30"`）、越界（`0`、`-5`）、不在白名单（`"NotATask"`） | **当场报错，模块不启动** |
+
+**放宽第二条就是放宽整个校验**——那是本项目最怕的改法。所以行为层的改动只针对"空"，校验一行没动。
+
+规则的**唯一定义**在新建的 `core/config.py`（`is_unset` / `setting` / `unset_keys`），纯逻辑、叶子、只用标准库。
+
+### 12.4 逐个字段的排查清单
+
+| 模块 | 字段 | 空值原本会怎样 | 处理 |
+| --- | --- | --- | --- |
+| `maa` | `task_type` | **抛 `TaskTypeError`，模块起不来** | ✅ 回退 + WARN |
+| `maa` | `task_ttl_minutes` | **抛 `ValueError`，模块起不来** | ✅ 回退 + WARN |
+| `maa` | `fetched_ttl_minutes` | 同上 | ✅ 回退 + WARN |
+| `shift_reminder` | `lead_minutes` | **抛 `ConfigError`，模块起不来** | ✅ 回退 + WARN |
+| `shift_reminder` | `timezone` | 已经回退（`parse_timezone` 早有这条） | ✔ 原样，未动 |
+| `shift_reminder` | `shift_N_name/start/hours` | 抛 `ConfigError` | ⚠️ **刻意保持严格**，理由见下 |
+| `recruit` | `max_operators` / `max_combinations` | 已经 WARN + 回退（`read_limit` 早有这条） | ✔ 原样，未动 |
+| `skland` | `signin_enabled` | `bool("")` 为 `False`，与默认值相同 | ✔ 语义上无差别，未动 |
+| `skland` | `signin_cron` | 已经回退（`_signin_cron` 早有这条） | ✔ 原样，未动 |
+| `main.py` | `modules` 开关段 | 缺失即"一个模块都不开"，是**有意义的取值** | ✔ 不动（空开关不是配置错误） |
+
+### 12.5 刻意保留的例外：班次槽位
+
+`shift_N_name/start/hours` 的空值**仍然报错**。这不是偷懒，理由是它们**互相依赖**：
+
+三班必须**合计 24 小时且首尾相接**。静默补一个默认值会得到一张**合法但不是用户想要**的表——提醒会在**错误的时刻**响，而且**不会报错**。那正是本项目最怕的"静默错位"（与 `10-maa-shift-switching.md` 里"触发一次就前进一班"同一族）。
+
+而且它们**不需要**回退：每个槽位字段在 schema 里都有 `items` 级默认值，全新安装不会产生空串——**这一点由 12.5 的模式护栏保证**。
+
+于是判据是：**字段独立、给错默认值最多"不如意" ⇒ 空即默认**；**字段互相依赖、给错默认值会静默错位 ⇒ 空即报错**。
+
+**⚠️ 这条是本包最值得被推翻的判断**，如果上级认为一致性优先于这条风险，改动很小（在 `parse_shift_slots` 里加回退即可），但那要连 `core/shifts.py` 的叶子约束一起处理。
+
+### 12.6 验证
+
+六条门禁全过：`verify_constitution` 0 ／ `check_astrbot_load_form` 0（21 个纯逻辑文件）／ `check_room_colours` 0 ／ `ruff check .` 全过 ／ `ruff format --check .` 79 个文件 ／ `pytest -q` **1102 passed**（F8 前 1058；本包新增 45 条，另移出 1 条把空串当非法值的参数 ⇒ 净 +44）。
+
+**可证伪验证（三处注入 → 红 → 逐字节还原 → 绿）**，脚本在仓库外、全程字节操作：
+
+| 注入 | 打的是哪一层 | 结果 |
+| --- | --- | --- |
+| `is_unset` 对空白永远返回 `False` | **行为** | 11 failed ✅ 红 |
+| `maa` 的读取点不再调用 `setting`（保留 helper 实现） | **接线** | 4 failed ✅ 红 |
+| 撤掉 schema 里 `maa.task_type` 的 `default` | **根因** | 2 failed ✅ 红 |
+
+还原全部 `sha256` 一致、复绿。**第二个探针是特意加的**：只测零件不测接线时护栏会假绿（M5 的教训）。
+
+### 12.7 动了什么
+
+- **新增** `core/config.py`（通用规则，纯逻辑叶子）、`tests/test_config_defaults.py`（45 条）。
+- **改** `modules/maa/module.py`（读取点 + `initialize` docstring 改成与代码一致）、`modules/shift_reminder/module.py`（`parse_lead_minutes` + 导入链）。
+- **改** `_conf_schema.json`：给 `maa.items.task_type` **补上漏写的 `default`**（根因）。
+- **改** `tests/test_maa_module.py`：从"非法值"清单里**移出 `{"task_type": ""}`**，并在 docstring 里写明**这是有意的重新分类，不是为了让测试变绿而放宽**；其余五条真填错的值一条没动。
+
+**未做**：没有 `git commit` / `git push` / `git tag`；没有改 `main.py`、`pages/**`、`ruff.toml`、`docs/architecture/**`、`core/shifts.py`。
+
+
