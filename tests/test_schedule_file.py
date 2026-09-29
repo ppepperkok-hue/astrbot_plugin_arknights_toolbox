@@ -243,3 +243,44 @@ def test_error_message_points_at_the_offending_plan_index() -> None:
         parse_schedule_file(_dump({"plans": [{"rooms": {}}, {"rooms": {}}, {"rooms": 5}]}))
 
     assert "plans[2]" in str(excinfo.value)
+
+
+# --- name → 时长提示（2026-09-29 追加） --------------------------------------
+#
+# 这一组只验「解析器有没有把提示填进 `PlanAssignment`」以及**向后兼容**；
+# 名字解析本身的边界用例在 `tests/test_plan_name.py`。
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("Shift 1 · 12h", 720),
+        ("Shift 2 · 6h", 360),
+        ("A+B 16H", 960),
+        ("第一班", None),
+        ("12H第一班", None),
+        ("A+B 高效长班 1", None),
+        ("", None),
+    ],
+)
+def test_plan_carries_the_duration_hint_read_from_its_name(name: str, expected: int | None) -> None:
+    plans = parse_schedule_file(_minimal_plans([{"name": name, "rooms": {}}]))
+
+    assert plans[0].duration_minutes == expected
+
+
+def test_duration_hint_defaults_to_none_for_callers_that_omit_it() -> None:
+    """向后兼容：既有的构造点（含别的测试）不传这个字段也必须能用。"""
+    plan = PlanAssignment(name="第一班", rooms=())
+
+    assert plan.duration_minutes is None
+
+
+def test_hint_is_independent_of_room_parsing() -> None:
+    """名字里有时长、但房间是空的——两件事互不影响，都要如实反映。"""
+    plans = parse_schedule_file(
+        _minimal_plans([{"name": "Shift 1 · 12h", "rooms": {"trading": []}}])
+    )
+
+    assert plans[0].rooms == ()
+    assert plans[0].duration_minutes == 720

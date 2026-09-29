@@ -1,9 +1,18 @@
 """基建排班表解析（纯逻辑）。
 
 只做一件事：把排班表 JSON 里的 ``plans[].rooms[].operators[]`` 提取成提醒可用的
-最小结构。**刻意不解析班次时长**——班次时刻由用户在插件配置里填，且不同来源的排班表
-在 ``plans[].name`` 上写法各异（实测样本里有 ``12H第一班``、``A+B 16H``、``1 7h``、
-``第1班``、``A 组 12 H`` 五种），靠名字解析时长既脆弱又没必要。
+最小结构。
+
+**关于班次时长（2026-09-29 修正）**：本模块原先写着「刻意不解析班次时长」，理由是
+``plans[].name`` 写法五花八门。那个理由**只对了一半**——名字确实五花八门，但
+riic.autos（ArknightsInfraCalc-v3）导出的名字是规整的（``Shift 1 · 12h``），
+里面**确实带着时长**；而 MAA 协议的 ``period``/``duration`` 字段在真实导出里
+**根本不存在**（实测确认）。所以现在把名字交给 :mod:`plan_name` 读一个**提示值**
+（``PlanAssignment.duration_minutes``），读得出来就替用户省掉手填时刻与凑 24 小时，
+读不出来仍为 ``None``，一切照旧。
+
+注意这是**提示而非结论**：单条名字读出的数字不作数，必须由
+:func:`plan_name.suggest_shift_minutes` 用「三段合计 24 小时」复核（见 `roster`）。
 
 纯逻辑：不 import astrbot、不碰文件系统（输入是**文本**）、不做网络。
 """
@@ -13,6 +22,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import Any
+
+from .plan_name import parse_duration_hint
 
 __all__ = [
     "PlanAssignment",
@@ -65,6 +76,14 @@ class PlanAssignment:
 
     rooms: tuple[RoomAssignment, ...]
     """该班的房间安排，按文件里的原始顺序排列。"""
+
+    duration_minutes: int | None = None
+    """从 ``name`` 里读出的**时长提示**（分钟），读不出来为 ``None``。
+
+    只是提示：决定「要不要用」的是 :func:`plan_name.suggest_shift_minutes`，
+    它要求三个名字**全部**读得出、且**合计正好 24 小时**。默认值是 ``None``，
+    所以既有构造点（含测试）不传也能继续工作。
+    """
 
 
 def parse_schedule_file(text: str) -> tuple[PlanAssignment, ...]:
@@ -122,14 +141,16 @@ def _parse_plan(plan: Any, position: int) -> PlanAssignment:
         raise ScheduleFileError(f"{label}.rooms 应为对象，实际是 {type(rooms).__name__}")
 
     name = plan.get("name")
+    safe_name = name if isinstance(name, str) else ""
 
     return PlanAssignment(
-        name=name if isinstance(name, str) else "",
+        name=safe_name,
         rooms=tuple(
             assignment
             for room_type, entries in rooms.items()
             for assignment in _parse_room(str(room_type), entries, label)
         ),
+        duration_minutes=parse_duration_hint(safe_name),
     )
 
 

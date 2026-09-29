@@ -659,7 +659,12 @@ class ShiftReminderModule(Module):
             path.name,
             imported["shift_count"],
         )
-        await self._reply(event, f"{roster.describe_roster(imported)}\n来源：{path.name}")
+        await self._reply(
+            event,
+            f"{roster.describe_roster(imported)}\n"
+            f"{roster.describe_duration_hint(imported)}\n"
+            f"来源：{path.name}",
+        )
 
     # --- WebUI（页面只是另一种入口；数据一律复用上面的既有实现） -----------
 
@@ -835,6 +840,14 @@ class ShiftReminderModule(Module):
                 "filename": UPLOAD_FILENAME,
                 # 与 /ak import 的回执同口径，用户两处看到的数字一致。
                 "summary": roster.describe_roster(imported),
+                # 能不能从名字里读出班次时长——页面据此显示「按排班表填入」按钮。
+                "duration_hint": roster.describe_duration_hint(imported),
+                "duration_hints_minutes": (
+                    list(hinted) if (hinted := roster.suggested_durations(imported)) else None
+                ),
+                "duration_suggestion_hours": (
+                    list(hours) if (hours := roster.suggested_hours(imported)) else None
+                ),
                 # 回显用户自己的文件名，只为让他确认「传的是哪个文件」。
                 "original_filename": shown,
             }

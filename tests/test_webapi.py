@@ -468,6 +468,58 @@ def test_roster_view_exposes_groups_and_totals() -> None:
     assert [group["room"] for group in first["groups"]] == ["trading", "dormitory"]
 
 
+def _roster_with_rhythm(names: list[str]) -> dict:
+    """把名字交给 `roster.build_roster`，拿到与真实落盘一致的形状。"""
+    from modules.shift_reminder import roster as roster_module
+    from modules.shift_reminder.schedule_file import parse_schedule_file
+
+    plans = [{"name": name, "rooms": {}} for name in names]
+    text = json.dumps({"plans": plans}, ensure_ascii=False)
+    return roster_module.build_roster(
+        parse_schedule_file(text), source="sample.json", imported_at=datetime(2026, 1, 1, 0, 0)
+    )
+
+
+def test_roster_view_exposes_the_duration_rhythm_for_the_page() -> None:
+    """页面的「按排班表填入」按钮靠这两个字段决定显示与否——必须给到。"""
+    view = webapi.roster_view(
+        _roster_with_rhythm(["Shift 1 · 12h", "Shift 2 · 6h", "Shift 3 · 6h"])
+    )
+
+    assert view["duration_hints_minutes"] == [720, 360, 360]
+    assert view["duration_suggestion_hours"] == [12, 6, 6]
+
+
+def test_roster_view_withholds_the_button_when_hours_are_not_whole() -> None:
+    """含非整点小时（真实样本里出现过 `C 组 8.5H`）——配置存不下，所以不给可填值。
+
+    提示仍要给（用户得知道读出来的是什么），但不能让页面显示一个必然保存失败的值。
+    """
+    view = webapi.roster_view(_roster_with_rhythm(["8.5h", "8.5h", "7h"]))
+
+    assert view["duration_hints_minutes"] == [510, 510, 420]
+    assert view["duration_suggestion_hours"] is None
+
+
+def test_roster_view_omits_hints_when_names_carry_none() -> None:
+    view = webapi.roster_view(_roster_with_rhythm(["第一班", "第二班", "第三班"]))
+
+    assert view["duration_hints_minutes"] is None
+    assert view["duration_suggestion_hours"] is None
+
+
+def test_roster_view_tolerates_a_corrupt_stored_hint() -> None:
+    """落盘数据被改坏时当作「没有建议」，而不是把坏值透给页面。"""
+    broken = _roster_sample()
+    broken["duration_hints_minutes"] = [720, "oops", 360]
+
+    view = webapi.roster_view(broken)
+
+    assert view["imported"] is True, "坏的建议不该让整份排班表都不可用"
+    assert view["duration_hints_minutes"] is None
+    assert view["duration_suggestion_hours"] is None
+
+
 def test_group_rooms_orders_known_types_before_unknown() -> None:
     """已知房型按 ROOM_ORDER 排，未知房型排最后——但没有被丢掉。"""
     rooms = [

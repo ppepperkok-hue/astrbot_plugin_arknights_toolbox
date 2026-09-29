@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .plan_name import MINUTES_PER_DAY, parse_duration_hint, suggest_shift_minutes
 from .schedule_file import PlanAssignment
 
 __all__ = [
@@ -23,10 +24,13 @@ __all__ = [
     "SHIFT_COUNT",
     "RosterImportError",
     "build_roster",
+    "describe_duration_hint",
     "describe_roster",
     "parse_import_argument",
     "render_roster_lines",
     "resolve_import_path",
+    "suggested_durations",
+    "suggested_hours",
 ]
 
 #: 本插件固定三班；排班表的 ``plans`` 数量必须与它一致（裁决见 implementation.md §2.6）。
@@ -170,20 +174,30 @@ def build_roster(
     Returns:
         可 JSON 序列化的结构：``{source, imported_at, shift_count, shifts[]}``，
         每个 shift 含 ``plan_index`` / ``plan_name`` / ``rooms[]``，每个 room 含
-        ``room`` / ``index`` / ``operators`` / ``skipped``。
+        ``room`` / ``index`` / ``operators`` / ``skipped``；另有
+        ``duration_hints_minutes``——从名字里读出的**时长提示**（读不出时为 ``None``）。
 
     Raises:
         RosterImportError: 班次数量不等于 `SHIFT_COUNT`。
+
+    Note:
+        ``duration_hints_minutes`` 是**建议，不是配置**：本函数**不碰** ``shifts``
+        配置项，用户没点「填入」之前，他的班次设置一个字都不会变。要用它必须
+        由用户在页面上确认（见 `docs/implementation/implementation.md` §2.6）。
     """
     if len(plans) != SHIFT_COUNT:
         raise RosterImportError(
             f"这份排班表是 {len(plans)} 班，本插件目前固定 {SHIFT_COUNT} 班，班次对不上，不能导入。"
         )
 
+    hints = suggest_shift_minutes([plan.name for plan in plans], expected_count=SHIFT_COUNT)
+
     return {
         "source": source,
         "imported_at": imported_at.isoformat(),
         "shift_count": len(plans),
+        # 读得出才是列表；读不出就是 None，页面据此不显示「一键填入」。
+        "duration_hints_minutes": list(hints) if hints else None,
         "shifts": [
             {
                 "plan_index": position + 1,
@@ -201,6 +215,133 @@ def build_roster(
             for position, plan in enumerate(plans)
         ],
     }
+
+
+def suggested_durations(roster: Mapping[str, Any] | None) -> tuple[int, ...] | None:
+    """把落盘的时长提示读回来；形状不对或没读出来都返回 ``None``。
+
+    读回来时**重新校验一次**：必须是 `SHIFT_COUNT` 个正整数、且合计 24 小时。
+    这份数据虽然是我们自己写的，但它躺在磁盘上、可能被外部改坏或被旧版本写成别的形状——
+    那时宁可当作「没有提示」，也不能拿一个坏值去建议用户改配置。
+
+    Args:
+        roster: `build_roster` 的产物，或 None。
+
+    Returns:
+        分钟数元组；不成立时 ``None``。
+    """
+    if not isinstance(roster, Mapping):
+        return None
+
+    raw = roster.get("duration_hints_minutes")
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        return None
+    if len(raw) != SHIFT_COUNT:
+        return None
+
+    minutes: list[int] = []
+    for item in raw:
+        if not isinstance(item, int) or isinstance(item, bool) or item <= 0:
+            return None
+        minutes.append(item)
+
+    if sum(minutes) != MINUTES_PER_DAY:
+        return None
+    return tuple(minutes)
+
+
+def suggested_hours(roster: Mapping[str, Any] | None) -> tuple[int, ...] | None:
+    """把时长建议换算成**小时**；含非整点小时时返回 ``None``。
+
+    ``_conf_schema.json`` 的 ``shift_N_hours`` 是整数（模块侧也按整数小时校验），
+    所以「8 小时 30 分」这种建议**存不进去**。与其让页面填一个保存时必然被拒的值、
+    让用户点了「填入」再在保存时吃一个错，不如在服务端就判定「这条建议不能直接填入」，
+    让页面改成提示手动调整——**不允许出现「点了填入、保存才报错」这种半成功**。
+
+    （真实样本里确实出现过 ``C 组 8.5H``，所以这不是假想的情况。）
+
+    Args:
+        roster: `build_roster` 的产物，或 None。
+
+    Returns:
+        小时数元组（如 ``(12, 6, 6)``）；建议不存在或含非整点小时时为 ``None``。
+    """
+    hinted = suggested_durations(roster)
+    if hinted is None or any(item % 60 for item in hinted):
+        return None
+    return tuple(item // 60 for item in hinted)
+
+
+def _format_minutes(minutes: int) -> str:
+    """分钟数 → 「12 小时」/「8 小时 30 分」，用于回执。"""
+    hours, rest = divmod(minutes, 60)
+    if not hours:
+        return f"{rest} 分钟"
+    return f"{hours} 小时" if not rest else f"{hours} 小时 {rest} 分"
+
+
+def _individual_hints(roster: Mapping[str, Any] | None) -> list[int | None]:
+    """逐个班次名字读时长（**不做** 24 小时闸门），用于把「为什么没给建议」说准。
+
+    闸门把两类完全不同的情况都归成 ``None``：①名字里压根没有时长；②每个名字都读得出、
+    但合计不是 24 小时。对用户而言这两句解释天差地别——第②种若说成「没读出来」，
+    用户会以为插件读不出时长（实测 ``333_layout_for_Orundum`` 的 12/12/8.5 就是这种），
+    于是重复上传、反复折腾。**失败要显式，也要准确。**
+    """
+    if not isinstance(roster, Mapping):
+        return []
+    shifts = roster.get("shifts")
+    if not isinstance(shifts, Sequence) or isinstance(shifts, (str, bytes)):
+        return []
+
+    hints: list[int | None] = []
+    for item in shifts:
+        if not isinstance(item, Mapping):
+            return []
+        hints.append(parse_duration_hint(item.get("plan_name", "")))
+    return hints
+
+
+def describe_duration_hint(roster: Mapping[str, Any] | None) -> str:
+    """给用户的**一句可操作**的话：读出了节奏、还是没读出。
+
+    三种结局都要说准（宪法 §2 第 2 条：看起来成功但什么都没发生是最高优先级 bug，
+    而「说错原因」同样会让人白折腾）：
+
+    1. 读出且能直接填 → 摊出节奏并说明去哪儿用（页面上有「填入」按钮）；
+    2. 读出了但**合计不是 24 小时** → 摊出读到的东西并说明为什么没采用；
+       不能笼统说成「读不出」——那会让用户以为插件没这个能力，于是反复重传；
+    3. 压根读不出（名字里没有时长）→ 明说「照旧手填」。
+
+    Args:
+        roster: `build_roster` 的产物，或 None。
+
+    Returns:
+        一行中文提示（不含换行）。
+    """
+    hinted = suggested_durations(roster)
+    if hinted is None:
+        # 区分「压根读不出」与「都读出了但合计不是 24 小时」——对用户是两件事。
+        partial = _individual_hints(roster)
+        if partial and all(item is not None for item in partial):
+            readable = [item for item in partial if item is not None]
+            rhythm = " / ".join(_format_minutes(item) for item in readable)
+            total = _format_minutes(sum(readable))
+            return (
+                f"从名字里读出了节奏：{rhythm}，但合计 {total} 不是 24 小时，"
+                "所以没有采用——班次时刻请自己设置。"
+            )
+        return "这份排班表的名字里没有可用的时长信息，班次时刻请照旧自己设置。"
+
+    rhythm = " / ".join(_format_minutes(item) for item in hinted)
+    if suggested_hours(roster) is None:
+        return (
+            f"从名字里读出了节奏：{rhythm}；但它含非整点小时，"
+            "而班次时长只支持整点小时，请手动调整。"
+        )
+    return (
+        f"从名字里读出了节奏：{rhythm}。想用它在页面上点「按排班表填入」即可，不点就不动你的设置。"
+    )
 
 
 def describe_roster(roster: Mapping[str, Any]) -> str:

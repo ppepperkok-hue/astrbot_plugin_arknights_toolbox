@@ -5,6 +5,7 @@ fixture 沿用 `tests/fixtures/infrast_*.json`（本项目自撰，结构与真�
 """
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -17,10 +18,13 @@ from modules.shift_reminder.roster import (
     SHIFT_COUNT,
     RosterImportError,
     build_roster,
+    describe_duration_hint,
     describe_roster,
     parse_import_argument,
     render_roster_lines,
     resolve_import_path,
+    suggested_durations,
+    suggested_hours,
 )
 from modules.shift_reminder.schedule_file import parse_schedule_file
 
@@ -461,3 +465,169 @@ def test_render_roster_lines_skipped_rooms_neither_show_nor_count_as_omitted() -
     assert "宿舍" not in "".join(lines), "标了不动的房间不该出现"
     shown_rooms = len(lines) - 2
     assert lines[-1] == f"……还有 {displayable - shown_rooms} 间未显示"
+
+
+# --- 从名字里读出的时长提示（V1.5.6） ----------------------------------------
+#
+# 这一组测的是「排班表里的班次时长如何被读出来、落盘、以及怎么告诉用户」。
+# 名字解析本身的边界用例在 `tests/test_plan_name.py`，这里只管**集成与落盘形状**。
+
+
+def _plans_named(names: list[str]) -> str:
+    """造一份只关心班次名字的最小排班表（房间内容与本题无关）。"""
+    return _minimal(
+        [{"name": name, "rooms": {"trading": [{"operators": ["A"]}]}} for name in names]
+    )
+
+
+def _roster_named(names: list[str]) -> dict[str, Any]:
+    return build_roster(
+        parse_schedule_file(_plans_named(names)), source="x.json", imported_at=IMPORTED_AT
+    )
+
+
+def test_build_roster_records_the_rhythm_read_from_names() -> None:
+    """真实导出格式：12/6/6 被读出来 → 落盘成分钟数。"""
+    roster = _roster_named(["Shift 1 · 12h", "Shift 2 · 6h", "Shift 3 · 6h"])
+
+    assert roster["duration_hints_minutes"] == [720, 360, 360]
+
+
+def test_build_roster_leaves_no_hint_when_names_carry_none() -> None:
+    """现有三班 fixture 的名字（第一班/第二班/第三班）不含时长 → 明确为 None。"""
+    roster = _roster_from(THREE_SHIFTS)
+
+    assert roster["duration_hints_minutes"] is None
+
+
+def test_build_roster_rejects_a_rhythm_that_is_not_24_hours() -> None:
+    """每个名字都读得出，但合计 1950 分钟 ≠ 24 小时 → 整条建议作废。"""
+    roster = _roster_named(["A 组 12 H", "B 组 12H", "C 组 8.5H"])
+
+    assert roster["duration_hints_minutes"] is None
+
+
+def test_build_roster_never_writes_config_keys() -> None:
+    """**设计保证**：导入只产出排班表数据，绝不夹带班次配置。
+
+    否则「导入一下就把用户的班次设置改了」——那是最不能接受的一种副作用。
+    """
+    roster = _roster_named(["Shift 1 · 12h", "Shift 2 · 6h", "Shift 3 · 6h"])
+
+    assert set(roster) == {
+        "source",
+        "imported_at",
+        "shift_count",
+        "duration_hints_minutes",
+        "shifts",
+    }
+    # 配置键的形状是 `shift_<序号>_<字段>`（如 `shift_1_name`）与 `lead_minutes`。
+    # 只按前缀 `shift_` 判断会误伤 `shift_count`，所以要按真实形状挡。
+    config_like = [
+        key for key in roster if re.fullmatch(r"shift_\d+_\w+", key) or key == "lead_minutes"
+    ]
+    assert config_like == [], f"导入结果里混进了配置键：{config_like}"
+
+
+def test_roster_with_hints_is_still_json_serialisable() -> None:
+    roster = _roster_named(["Shift 1 · 12h", "Shift 2 · 6h", "Shift 3 · 6h"])
+
+    assert json.loads(json.dumps(roster, ensure_ascii=False))["duration_hints_minutes"] == [
+        720,
+        360,
+        360,
+    ]
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        None,
+        {},
+        {"duration_hints_minutes": None},
+        {"duration_hints_minutes": "720,360,360"},
+        # 个数不对
+        {"duration_hints_minutes": [720, 720]},
+        {"duration_hints_minutes": [720, 360, 360, 0]},
+        # 非整数 / 布尔 / 非正
+        {"duration_hints_minutes": [720.5, 360, 359.5]},
+        {"duration_hints_minutes": [True, 720, 720]},
+        {"duration_hints_minutes": [0, 720, 720]},
+        {"duration_hints_minutes": [-720, 1080, 1080]},
+        # 合计不是 24 小时
+        {"duration_hints_minutes": [720, 720, 720]},
+    ],
+)
+def test_suggested_durations_refuses_broken_stored_shapes(stored: Any) -> None:
+    """落盘的数据可能被外部改坏或被旧版本写成别的形状——那时当作「没有提示」。"""
+    assert suggested_durations(stored) is None
+
+
+def test_suggested_durations_reads_back_a_good_rhythm() -> None:
+    assert suggested_durations(_roster_named(["12h", "6h", "6h"])) == (720, 360, 360)
+
+
+@pytest.mark.parametrize(
+    ("names", "expected"),
+    [
+        # 全是整点小时 → 可以直接填进配置
+        (["Shift 1 · 12h", "Shift 2 · 6h", "Shift 3 · 6h"], (12, 6, 6)),
+        (["A+B 16H", "A+C 4H", "B+C 4H"], (16, 4, 4)),
+        (["8h", "8h", "8h"], (8, 8, 8)),
+        # 含非整点小时 → 配置存不下（`shift_N_hours` 是整数），不给建议
+        (["8.5h", "8.5h", "7h"], None),
+        # 读不出节奏
+        (["第一班", "第二班", "第三班"], None),
+    ],
+)
+def test_suggested_hours_only_offers_what_the_config_can_store(
+    names: list[str], expected: tuple[int, ...] | None
+) -> None:
+    assert suggested_hours(_roster_named(names)) == expected
+
+
+def test_suggested_hours_refuses_broken_stored_shapes() -> None:
+    assert suggested_hours(None) is None
+    assert suggested_hours({"duration_hints_minutes": [720, 360, 360, 0]}) is None
+
+
+def test_describe_duration_hint_is_actionable_when_a_rhythm_was_read() -> None:
+    text = describe_duration_hint(_roster_named(["Shift 1 · 12h", "Shift 2 · 6h", "Shift 3 · 6h"]))
+
+    assert "12 小时" in text and "6 小时" in text
+    assert "按排班表填入" in text, "要告诉用户去哪儿用它，否则这句话没有可操作性"
+    assert "不动你的设置" in text, "必须说清点了才生效"
+
+
+def test_describe_duration_hint_explains_when_it_cannot_auto_fill() -> None:
+    """含非整点小时：说清为什么不能自动填，而不是让用户点了才在保存时吃错。"""
+    text = describe_duration_hint(_roster_named(["8.5h", "8.5h", "7h"]))
+
+    assert "8 小时 30 分" in text
+    assert "整点" in text
+    assert "按排班表填入" not in text, "不能自动填时不该引导他去点按钮"
+
+
+def test_describe_duration_hint_says_so_when_nothing_was_read() -> None:
+    text = describe_duration_hint(_roster_from(THREE_SHIFTS))
+
+    assert "照旧" in text or "手动" in text
+    assert "按排班表填入" not in text
+
+
+def test_describe_duration_hint_distinguishes_an_inconsistent_rhythm() -> None:
+    """**读出来了但合计不对** ≠ **读不出来** —— 这两句对用户是完全不同的信息。
+
+    实测样本 ``333_layout_for_Orundum`` 就是这种：名字里有 12/12/8.5，合计 32.5 小时。
+    若笼统报「名字里没有可用的时长信息」，用户会以为插件读不出时长而反复重传。
+    """
+    text = describe_duration_hint(_roster_named(["A 组 12 H", "B 组 12H", "C 组 8.5H"]))
+
+    assert "12 小时" in text and "8 小时 30 分" in text, "读到的节奏要摊出来"
+    assert "不是 24 小时" in text, "要说清拒绝的理由"
+    assert "没有可用的时长信息" not in text
+    assert "按排班表填入" not in text
+
+
+def test_describe_duration_hint_handles_missing_roster() -> None:
+    assert describe_duration_hint(None)  # 返回一句人话，不抛异常

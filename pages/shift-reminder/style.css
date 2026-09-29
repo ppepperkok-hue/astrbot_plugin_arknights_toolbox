@@ -184,6 +184,31 @@ button.small {
   margin-top: 4px;
 }
 
+/* 时长建议：从排班表名字里读出的节奏，点按钮才填进时间轴。 */
+.suggestion {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 10px 0 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.suggestion[hidden] {
+  display: none;
+}
+
+.suggestion p {
+  flex: 1 1 260px;
+  margin: 0;
+}
+
+.suggestion button {
+  flex: 0 0 auto;
+}
+
 /* 顶部汇总：让用户一眼看出「这套布局有多大」。 */
 .roster-summary {
   display: flex;

@@ -15,7 +15,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
-from .roster import ROOM_LABELS
+from .roster import ROOM_LABELS, suggested_durations, suggested_hours
 from .schedule import Shift, format_hhmm
 from .strategy import Snapshot
 
@@ -264,7 +264,10 @@ def roster_view(roster: Mapping[str, Any] | None) -> dict[str, Any]:
 
     Returns:
         可 JSON 序列化的 dict。已导入时含 ``source`` / ``imported_at`` /
-        ``shift_count`` / ``skipped_total`` 与逐班逐房的明细。
+        ``shift_count`` / ``skipped_total`` 与逐班逐房的明细；另有
+        ``duration_hints_minutes``——从班次名字里读出的**时长建议**（分钟），
+        读不出时为 ``None``。页面据此决定要不要显示「按排班表填入」按钮：
+        **这不是配置，点了才生效**（裁决见 `docs/implementation/implementation.md` §2.6）。
     """
     if not isinstance(roster, Mapping):
         return {"imported": False}
@@ -321,6 +324,11 @@ def roster_view(roster: Mapping[str, Any] | None) -> dict[str, Any]:
         # 顶部汇总用：让用户一眼看出「这套布局有多大」。
         "total_rooms": total_rooms,
         "total_operators": total_operators,
+        # 时长建议：读出来才有（读回来时已重新校验过一次），页面据此显示「填入」按钮。
+        "duration_hints_minutes": list(hinted) if (hinted := suggested_durations(roster)) else None,
+        # 可以直接填进配置的小时数；含非整点小时时为 None（配置只支持整点小时），
+        # 页面据此改提示而不给按钮——避免「点了填入、保存才报错」。
+        "duration_suggestion_hours": (list(hours) if (hours := suggested_hours(roster)) else None),
         "shifts": shifts,
     }
 

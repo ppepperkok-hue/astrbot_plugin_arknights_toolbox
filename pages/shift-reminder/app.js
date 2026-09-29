@@ -244,6 +244,8 @@ let segments = [];
 /** 保存成功后用于「撤销改动」。 */
 let pristine = null;
 let leadMinutes = 10;
+/** 排班表里读出的整点小时建议（`[12, 6, 6]`）；没有则为 null。 */
+let suggestedHours = null;
 
 function snapshotSegments() {
   return segments.map((seg) => ({ ...seg }));
@@ -683,6 +685,8 @@ function renderRoster(view) {
   }
 
   if (!view || view.imported !== true) {
+    suggestedHours = null;
+    renderDurationSuggestion(null);
     const p = document.createElement("p");
     p.className = "muted";
     p.textContent =
@@ -691,6 +695,12 @@ function renderRoster(view) {
     host.append(p);
     return;
   }
+
+  // 时长建议：只有排班表读出节奏时才显示（点按钮才动配置，绝不自动改）。
+  suggestedHours = Array.isArray(view.duration_suggestion_hours)
+    ? view.duration_suggestion_hours
+    : null;
+  renderDurationSuggestion(view);
 
   // --- 顶部汇总：一眼看出「这套布局有多大」 ---------------------------------
   if (summaryHost) {
@@ -827,6 +837,101 @@ function renderRoster(view) {
   });
 }
 
+/**
+ * 用建议的小时数替换各段时长，**保持第一班的开始时刻不变**，其余边界依次顺延。
+ *
+ * 为什么锚定第一班而不是重排一切：排班表里**没有**起始时刻的信息（实测
+ * `plans[].name` 只给时长，`period`/`duration` 字段在真实导出里根本不存在）。
+ * 所以这里只动「每段多长」，不动「从几点开始」——那是用户自己的作息，不能替他改。
+ *
+ * @returns 新的 segments（不修改入参）；形状不合法、或小时数合计不等于 24 时返回 null。
+ *   合计必须校验：只填时长不校验的话，用户会在「保存」那一步才吃错，属于半成功。
+ */
+export function applySuggestedHours(segments, hours) {
+  if (!Array.isArray(segments) || segments.length === 0) {
+    return null;
+  }
+  if (!Array.isArray(hours) || hours.length !== segments.length) {
+    return null;
+  }
+
+  const minutes = hours.map((value) => (Number.isFinite(value) ? Math.round(value) * HOUR : NaN));
+  if (minutes.some((value) => !Number.isFinite(value) || value <= 0)) {
+    return null;
+  }
+  if (minutes.reduce((sum, value) => sum + value, 0) !== MINUTES_PER_DAY) {
+    return null;
+  }
+
+  let cursor = wrapMinutes(segments[0].startMin);
+  return segments.map((seg, index) => {
+    const start = cursor;
+    cursor = wrapMinutes(cursor + minutes[index]);
+    return { ...seg, startMin: start, minutes: minutes[index] };
+  });
+}
+
+/**
+ * 显示/隐藏「按排班表填入」那块。
+ *
+ * 三种情况必须分辨清楚，不能含糊：
+ * ① 没读出时长 → 整块隐藏（用户按老办法手填，不打扰他）；
+ * ② 读出了但含非整点小时 → 显示节奏、**不给按钮**，说明为什么不能自动填
+ *    （配置只支持整点小时，`C 组 8.5H` 这种真实存在）；
+ * ③ 读出且都是整点 → 给按钮，并说清「填完还要点保存」。
+ */
+function renderDurationSuggestion(view) {
+  const box = byId("duration-suggestion");
+  const button = byId("apply-durations");
+  if (!box) {
+    return;
+  }
+
+  const hints = view && Array.isArray(view.duration_hints_minutes) ? view.duration_hints_minutes : null;
+  suggestedHours = view && Array.isArray(view.duration_suggestion_hours)
+    ? view.duration_suggestion_hours
+    : null;
+
+  if (!hints || hints.length === 0) {
+    box.hidden = true;
+    return;
+  }
+
+  const rhythm = hints.map((value) => formatDuration(value)).join(" / ");
+  box.hidden = false;
+
+  if (!suggestedHours) {
+    setText(
+      "duration-suggestion-text",
+      `排班表里的节奏是 ${rhythm}，但它含非整点小时，而班次时长只支持整点小时——请手动调整。`,
+    );
+    if (button) {
+      button.hidden = true;
+    }
+    return;
+  }
+
+  setText(
+    "duration-suggestion-text",
+    `排班表里的节奏是 ${rhythm}：可以一键填进时间轴（第一班的开始时刻保持你现在的设置），填完还要点「保存并生效」。`,
+  );
+  if (button) {
+    button.hidden = false;
+  }
+}
+
+/** 「按排班表填入」：只改各段时长，不动第一班的开始时刻，也**不自动保存**。 */
+function applyDurationsFromRoster() {
+  const next = applySuggestedHours(segments, suggestedHours);
+  if (!next) {
+    setText("save-hint", "时间轴还没读到班次，先点「刷新」再试。");
+    return;
+  }
+  segments = next;
+  renderTimeline();
+  setText("save-hint", "已按排班表填入时长——还没保存，确认无误后点「保存并生效」。");
+}
+
 async function loadRoster() {
   try {
     const view = await window.AstrBotPluginPage.apiGet(ROSTER_ENDPOINT);
@@ -952,6 +1057,7 @@ async function main() {
   });
   byId("lead-input")?.addEventListener("input", renderLeadHint);
   byId("roster-upload")?.addEventListener("click", uploadRoster);
+  byId("apply-durations")?.addEventListener("click", applyDurationsFromRoster);
 
   await refresh();
   await loadRoster();
