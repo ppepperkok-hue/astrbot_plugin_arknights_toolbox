@@ -58,12 +58,21 @@ def _stamp(moment: datetime | None) -> str:
 
 
 def queued_text(result: EnqueueResult) -> str:
-    """`/ak maa run` 成功排队后的回执。"""
+    """`/ak maa run` 成功排队后的回执。
+
+    ⚠️ 这里必须**提前**说清「约一秒就取走、之后只能叫停」——现场实测任务从排队
+    到被领走**只隔 3 毫秒**，用户以为"先派上，不对再撤"，而撤销的窗口几乎不存在。
+    把代价放在确认之后才说，等于用文案掩盖（`cancel` 的措辞同理）。
+    """
     task = result.task or {}
     lines = [
         "已排队：{}".format(task_type_label(str(task.get("type", "")))),
         f"任务 id：{_short(result.task_id)}",
         "MAA 下次轮询（默认 1 秒一次）就会取走它，取走后就开始跑。",
+        "",
+        "⚠️ **它会在约一秒内被取走，之后就没法「撤」了**——协议只提供一条"
+        "「尝试结束当前任务」的指令，能不能拦住要看它跑到哪一步。"
+        "所以**想反悔要趁现在**（`/ak maa cancel`），别等它跑起来。",
         "",
         "⚠️ 它跑完之后，班次会按 MAA 自己的规则前进一格。所以"
         "**一次换班只派一次**——多派一次就多跳一班，而且会写进它的配置、不会自动纠正。",
@@ -84,8 +93,14 @@ def already_pending_text(result: EnqueueResult) -> str:
         + (f"，已被取走 {pending.fetch_count} 次" if pending and fetched else "，还没被取走"),
         "",
         "一个时刻只允许一个任务：多派一次，班次就会多前进一班。",
-        "想撤掉它用 /ak maa cancel。",
     ]
+    if fetched:
+        lines.append(
+            "⚠️ 它**已经被 MAA 取走**了，所以 `/ak maa cancel` 只能给它发一条"
+            "「尝试结束」的指令，**不一定拦得住**。"
+        )
+    else:
+        lines.append("它还没被取走，现在用 /ak maa cancel 还来得及拦住。")
     return "\n".join(lines)
 
 
@@ -102,27 +117,88 @@ def already_done_text(result: EnqueueResult) -> str:
     )
 
 
-def skipped_text(slot_label: str) -> str:
-    """`/ak maa skip`：记下"我自己换"。"""
+def skipped_text(slot_label: str, *, stop_sent: bool = False) -> str:
+    """`/ak maa skip`：记下"我自己换"。
+
+    ⚠️ 这里原来写的是「这样 MAA 内部的班次索引**不会前进**」——**那句话在任务已被
+    取走时是假的**：`skip` 内部也走 `cancel`，而取走过的任务拦不住（只能叫停）。
+    现在按是否真的拦住了分成两种说法。**不许把保证写成无条件的。**
+    """
     who = f"（{slot_label}）" if slot_label else ""
+    head = f"好，这一班{who}你自己换，不给 MAA 派任务。"
+    if stop_sent:
+        return "\n".join(
+            [
+                head,
+                "",
+                "⚠️ 不过那一个任务**已经被 MAA 取走**了，所以「不派」并不能让它停下——"
+                "我另外给它发了「尝试结束当前任务」的指令，**不保证拦得住**。",
+                "",
+                "如果它还是跑完了，**班次索引仍然会前进一格**，那就和你的手动操作错位了。"
+                "到时候以 MAA 那边的实际状态为准。",
+            ]
+        )
     return "\n".join(
         [
-            f"好，这一班{who}你自己换，不给 MAA 派任务。",
+            head,
             "",
-            "这样 MAA 内部的班次索引**不会前进**，与你的手动操作不会错位。",
+            "它还没被取走，所以确实不会被跑掉——MAA 内部的班次索引**不会前进**，"
+            "与你的手动操作不会错位。",
             "需要它跑的时候再发 /ak maa run。",
         ]
     )
 
 
-def cancelled_text(task: PendingTask | None) -> str:
+def cancelled_text(task: PendingTask | None, *, stop_sent: bool = False) -> str:
+    """撤销的结果。
+
+    `stop_sent` 表示「这条任务已被 MAA 取走，所以我们给它下发了一条 `StopTask`」。
+    两种情况必须分开说，因为**用户能做的下一步不同**：没取走的只是不再下发；
+    取走过的要等 MAA 那边真的停下来，而官方说 `StopTask` 只是「**尝试**结束」，
+    所以这里**不许**出现「已取消/已停止」这种把结果说死的措辞。
+    """
     if task is None:
         return no_pending_text()
+    head = f"已把这个任务从队列里撤掉（{task.slot_label}，id {_short(task.task_id)}）。"
+    if not stop_sent:
+        return "\n".join(
+            [
+                head,
+                "",
+                "它还没被 MAA 取走，所以不会再被下发。",
+            ]
+        )
     return "\n".join(
         [
-            f"已撤掉这个任务（{task.slot_label}，id {_short(task.task_id)}）。",
+            head,
             "",
-            "如果它已经被 MAA 取走并在跑了，撤掉不影响那一趟；这里只是不再重复下发。",
+            "⚠️ 它**已经被 MAA 取走了**，所以光撤队列拦不住它——我另外给它下发了一条"
+            "「结束当前任务」指令（StopTask）。",
+            "",
+            "官方原文说这条指令只是「**尝试**结束当前运行的任务」，而且**不会等待确认**，"
+            "所以我现在只能说「已发送」，**不能说已经停了**。"
+            "要确认它真的停下，看 MAA 那边还在不在跑。",
+        ]
+    )
+
+
+def stopped_text(*, confirmed: bool, slot_label: str = "") -> str:
+    """心跳确认之后的结论。`confirmed=False` 表示仍看到它没停。"""
+    who = f"（{slot_label}）" if slot_label else ""
+    if confirmed:
+        return "\n".join(
+            [
+                f"确认过了：MAA 那边{who}已经没有在跑的任务，停止指令生效了。",
+                "",
+                "注意「停了」不等于「班次没前进」——已经跑掉的部分是收不回来的。",
+            ]
+        )
+    return "\n".join(
+        [
+            f"仍未确认停掉{who}：心跳回报显示它还在执行。",
+            "",
+            "可能是停止指令还没轮到它，也可能是这一趟已经接近收尾。"
+            "可以稍后再发一次 /ak maa cancel。",
         ]
     )
 

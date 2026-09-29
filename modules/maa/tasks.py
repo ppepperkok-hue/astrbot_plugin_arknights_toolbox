@@ -32,11 +32,14 @@ from typing import Any
 __all__ = [
     "ALL_TASK_TYPES",
     "DEFAULT_TASK_TYPE",
+    "HEART_BEAT",
     "LINK_START",
     "LINK_START_BASE",
+    "STOP_TASK",
     "SUPPORTED_TASK_TYPES",
     "TASK_TYPE_LABELS",
     "TaskTypeError",
+    "build_control_task",
     "build_task",
     "coerce_task_type",
     "task_type_label",
@@ -44,6 +47,22 @@ __all__ = [
 
 #: 启动一键长草（整套流程）。所有者原话：「定时启动 maa 让它跑完全套流程」。
 LINK_START = "LinkStart"
+
+#: 「立即执行任务」——**不是**给用户选的任务类型，而是本模块自己用的控制指令。
+#:
+#: 官方原文（`https://docs.maa.plus/zh-cn/protocol/remote-control-schema.html`）：
+#:
+#:   StopTask「'结束当前任务'任务，将会**尝试**结束当前运行的任务。如果任务列表还有
+#:   其他任务会继续开始执行下一个。该任务**不会等待并确认当前任务已停止才会返回**，
+#:   因此请使用心跳任务来确认停止命令是否已生效。」
+#:
+#: 两处措辞直接决定用法：**「尝试」** ⇒ 撤销的文案不许写成「已取消」；
+#: **「不会等待并确认」** ⇒ 想知道停没停，只能靠 `HeartBeat`。
+STOP_TASK = "StopTask"
+
+#: 心跳。「会立即返回，并且将当前'顺序执行的任务'队列中正在执行的任务的 Id 作为
+#: Payload 返回，如果当前没有任务执行，返回空字符串。」
+HEART_BEAT = "HeartBeat"
 
 #: 只跑基建子功能。比整套快得多，但**不是**所有者要的那个。
 LINK_START_BASE = "LinkStart-Base"
@@ -136,3 +155,33 @@ def coerce_task_type(value: Any) -> str:
     raise TaskTypeError(
         f"任务类型配置不合法：{value!r}；当前可用：{'、'.join(SUPPORTED_TASK_TYPES)}"
     )
+
+
+#: 本模块自己下发的控制指令。**刻意与 `SUPPORTED_TASK_TYPES` 分开**：
+#: 那两个是「用户能选的任务」，这两个是「系统用来控制 MAA 的」。
+#: 合在一起会让配置里也能填 `StopTask`——那等于让用户以为在下发任务，
+#: 实际是在叫停自己。
+CONTROL_TASK_TYPES: frozenset[str] = frozenset({STOP_TASK, HEART_BEAT})
+
+
+def build_control_task(task_id: str, task_type: str) -> dict[str, str]:
+    """构造一条控制指令（`StopTask` / `HeartBeat`）。
+
+    Args:
+        task_id: 本条控制指令自己的 id。**与换班任务的 id 空间无关**——
+            官方只要求「同一个 id 不会重复执行」，而控制指令**不是换班任务**，
+            它不参与「同一次换班 ⇒ 同一个 id」那套去重，也不影响班次计数。
+            刻意不复用 `queue.task_id_for`：那会把控制指令和换班时刻绑在一起，
+            让"撤了再撤"第二次发不出去（同 id 会被 MAA 忽略）。
+        task_type: 必须是 `CONTROL_TASK_TYPES` 之一。
+
+    Raises:
+        TaskTypeError: 类型不对。显式抛错，不让调用方误发一个用户任务类型。
+    """
+    if not isinstance(task_id, str) or not task_id.strip():
+        raise TaskTypeError("控制指令 id 不能为空")
+    if task_type not in CONTROL_TASK_TYPES:
+        raise TaskTypeError(
+            f"「{task_type}」不是控制指令；可用：{'、'.join(sorted(CONTROL_TASK_TYPES))}"
+        )
+    return {"id": task_id, "type": task_type}

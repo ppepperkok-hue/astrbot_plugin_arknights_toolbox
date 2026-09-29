@@ -73,7 +73,7 @@ except ImportError:  # pragma: no cover
     from ...core.permission import session_allowed
 
 from . import protocol, relay, tasks
-from .queue import AckOutcome, EnqueueOutcome, Slot, TaskQueue
+from .queue import AckOutcome, EnqueueOutcome, PendingTask, Slot, TaskQueue
 
 COMMAND_NAMES = ("maa",)
 
@@ -344,6 +344,27 @@ class MaaModule(Module):
         else:
             await self._reply(event, relay.already_done_text(result))
 
+    def _withdraw(self) -> tuple[PendingTask | None, bool]:
+        """撤掉待结任务；**若它已被 MAA 取走，补发一条停止指令**。
+
+        两处调用（`skip` 与 `cancel`）共用这一段：它们对用户是两件事，对 MAA 是
+        同一件事——「别跑那一个」。分开写迟早会有一边忘了补发，而**忘了补发不会报错**，
+        只会让用户以为拦住了（`skip` 的旧文案就是这么错的：它无条件保证「索引不会前进」）。
+
+        Returns:
+            (被撤掉的任务, 是否发了停止指令)
+        """
+        cancelled = self._queue.cancel()
+        if cancelled is None or cancelled.first_fetch_at is None:
+            return cancelled, False
+        control = self._queue.enqueue_control(tasks.STOP_TASK)
+        logger.info(
+            "[ak_toolbox][maa] 任务 %s 已被取走，已下发停止指令（id %s）",
+            cancelled.task_id[:8],
+            control["id"][:8],
+        )
+        return cancelled, True
+
     async def _cmd_skip(self, event: Any) -> None:
         """`/ak maa skip`：「这一班我自己换」。
 
@@ -352,20 +373,33 @@ class MaaModule(Module):
         MAA 跑，它会在「它以为的下一班」上再换一次，与手动结果错位。记下时间点，
         排查「班次对不上」时才知道该往哪儿看。
         """
-        cancelled = self._queue.cancel()
+        cancelled, stop_sent = self._withdraw()
         self._last_manual_at = datetime.now()
         logger.info(
-            "[ak_toolbox][maa] 用户选择自己换班（%s）；待取任务：%s",
+            "[ak_toolbox][maa] 用户选择自己换班（%s）；待取任务：%s%s",
             self._last_manual_at.strftime("%m-%d %H:%M:%S"),
             "已撤掉" if cancelled else "无",
+            "（并发出了停止指令）" if stop_sent else "",
         )
-        await self._reply(event, relay.skipped_text(cancelled.slot_label if cancelled else ""))
+        await self._reply(
+            event,
+            relay.skipped_text(cancelled.slot_label if cancelled else "", stop_sent=stop_sent),
+        )
 
     async def _cmd_cancel(self, event: Any) -> None:
-        """`/ak maa cancel`：撤掉还没被取走的任务。"""
-        cancelled = self._queue.cancel()
-        logger.info("[ak_toolbox][maa] 用户撤掉了待取任务：%s", "有" if cancelled else "无")
-        await self._reply(event, relay.cancelled_text(cancelled))
+        """`/ak maa cancel`：撤掉任务；**已经被取走的话还必须下发停止指令**。
+
+        为什么必须补上那一步：任务一进队列，MAA 通常**在 1 秒内**就把它领走了
+        （现场实测：排队 14:06:55.665、被取走 14:06:55.668，**只隔 3 毫秒**）。
+        所以「只撤队列」删掉的只是我们手里的记录，**MAA 那边照跑不误**——
+        这正是用户报的「id dc34e29b 的任务撤销了依旧执行」。
+
+        判据用 `first_fetch_at`：它记着这条任务**有没有被取走过**，不需要另加状态。
+        """
+        cancelled, stop_sent = self._withdraw()
+        if not stop_sent:
+            logger.info("[ak_toolbox][maa] 用户撤掉了待取任务：%s", "有" if cancelled else "无")
+        await self._reply(event, relay.cancelled_text(cancelled, stop_sent=stop_sent))
 
     def _manual_slot(self) -> Slot:
         """手动触发用的 slot，**按分钟粒度**。

@@ -17,6 +17,7 @@ import pytest
 
 from modules.maa import queue as q
 from modules.maa import tasks
+from modules.maa.queue import EnqueueOutcome
 
 T0 = datetime(2026, 9, 29, 8, 50, 0)
 SLOT_A = q.Slot(key="2026-09-29T09:00", label="09-29 09:00 早班")
@@ -372,3 +373,88 @@ def test_expired_counter_is_exposed() -> None:
     queue.sweep(now=T0 + timedelta(minutes=2))
 
     assert queue.snapshot().expired_total == 1
+
+
+# --- 控制指令（StopTask）-------------------------------------------------------
+#
+# 起因是一个真 bug：用户撤销了一个任务，MAA 却依旧执行。根因是任务进队列后
+# **3 毫秒**就被领走了（MAA 每秒轮询），而「撤销」只删了我们自己的记录，
+# 没有把官方的「结束当前任务」指令送出去。
+#
+# 这几条钉住的是：控制指令能送出去，而且**绝不参与换班计数**。
+
+
+def test_control_task_is_delivered_alongside_the_pending_task() -> None:
+    queue = _queue()
+    queue.enqueue(SLOT_A, now=T0)
+    queue.take_for_delivery(now=T0)
+
+    queue.enqueue_control("StopTask", now=T0)
+    delivered = queue.take_for_delivery(now=T0)
+
+    types = [t["type"] for t in delivered]
+    assert "StopTask" in types
+    assert "LinkStart" in types
+
+
+def test_control_is_delivered_even_when_the_queue_is_empty() -> None:
+    """撤掉之后队列是空的，但停止指令**必须还能送出去**——
+    否则「撤销一个已被取走的任务」就永远发不出停止命令了。
+    """
+    queue = _queue()
+    queue.enqueue(SLOT_A, now=T0)
+    queue.take_for_delivery(now=T0)
+    queue.cancel()
+
+    queue.enqueue_control("StopTask", now=T0)
+    delivered = queue.take_for_delivery(now=T0)
+
+    assert [t["type"] for t in delivered] == ["StopTask"]
+
+
+def test_control_does_not_count_as_a_shift_task() -> None:
+    """控制指令**不是换班任务**：不许影响 created/acked/expired 任何计数。
+
+    这条是本次改动的核心约束——`触发次数 = 换班次数`，多算一次班次就会多前进一班。
+    """
+    queue = _queue()
+    before = queue.snapshot()
+
+    queue.enqueue_control("StopTask", now=T0)
+    queue.take_for_delivery(now=T0)
+    after = queue.snapshot()
+
+    assert after.created_total == before.created_total
+    assert after.acked_total == before.acked_total
+    assert after.expired_total == before.expired_total
+    assert after.has_pending is before.has_pending
+
+
+def test_control_does_not_block_a_new_shift_task() -> None:
+    """在途的控制指令**不得**让新的换班任务被当成「已有一个未结任务」。"""
+    queue = _queue()
+    queue.enqueue_control("StopTask", now=T0)
+
+    result = queue.enqueue(SLOT_A, now=T0)
+
+    assert result.outcome is EnqueueOutcome.CREATED
+
+
+def test_control_expires_so_it_does_not_haunt_every_poll() -> None:
+    """指令有 TTL：否则「每轮都带一条 StopTask」会永远持续下去。"""
+    queue = _queue()
+    queue.enqueue_control("StopTask", ttl_minutes=10, now=T0)
+
+    assert queue.pending_control_count() == 1
+    queue.take_for_delivery(now=T0 + timedelta(minutes=11))
+
+    assert queue.pending_control_count() == 0
+
+
+def test_each_control_gets_a_fresh_id() -> None:
+    """重复撤销要能真的再发一次：同 id 会被 MAA 忽略，所以不能复用。"""
+    queue = _queue()
+    first = queue.enqueue_control("StopTask", now=T0)
+    second = queue.enqueue_control("StopTask", now=T0)
+
+    assert first["id"] != second["id"]

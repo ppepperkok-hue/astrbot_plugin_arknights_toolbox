@@ -212,7 +212,28 @@ def test_cancelled_text_mentions_the_task() -> None:
     text = relay.cancelled_text(cancelled)
 
     assert result.task_id[:8] in text
-    assert "已撤掉" in text
+    assert "撤掉" in text
+    # 这一条说的是「没被取走」那种情况：只撤队列，不该出现停止指令的说法。
+    assert "StopTask" not in text
+
+
+def test_cancelled_text_says_stop_was_only_attempted_when_it_was_fetched() -> None:
+    """已被取走的任务：必须说明「已发送停止指令」，而且**不许把结果说死**。
+
+    官方原文是 StopTask「将会**尝试**结束当前运行的任务」，所以措辞里不能出现
+    「已取消 / 已停止」这类断言——那是把「试过了」说成「成功了」。
+    """
+    queue = TaskQueue(clock=lambda: T0)
+    queue.enqueue(SLOT, now=T0)
+    queue.take_for_delivery(now=T0)  # MAA 取走了它
+    cancelled = queue.cancel()
+
+    text = relay.cancelled_text(cancelled, stop_sent=True)
+
+    assert "StopTask" in text
+    assert "尝试" in text
+    assert "已取消" not in text
+    assert "已停止" not in text
 
 
 def test_cancelling_nothing_falls_back_to_the_empty_queue_text() -> None:

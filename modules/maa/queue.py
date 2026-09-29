@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 
-from .tasks import DEFAULT_TASK_TYPE, build_task
+from .tasks import DEFAULT_TASK_TYPE, build_control_task, build_task
 
 __all__ = [
     "AckOutcome",
@@ -212,6 +212,13 @@ class TaskQueue:
         self._clock: _Clock = clock or datetime.now
 
         self._pending: PendingTask | None = None
+        #: 待下发的**控制指令**（`StopTask` 等）。与 `_pending` 刻意分开：
+        #: `_pending` 是「一次换班」并且参与班次计数，控制指令**不是换班**、
+        #: **不影响任何计数**。合在一起会让 `StopTask` 被当成"又跑了一趟"，
+        #: 而本项目最怕的就是班次被多推一格（见 `10-maa-shift-switching.md`）。
+        #: 存 (指令体, 过期时刻)：重复下发同 id 是安全的（官方保证同 id 不重复执行），
+        #: 所以不需要"只给一次"；但也因此必须有 TTL，否则会永远带着。
+        self._control: deque[tuple[dict[str, str], datetime]] = deque()
         #: 「这一次换班已经处理过」的 slot key，**有界**（防止无限增长）。
         self._done: set[str] = set()
         self._done_order: deque[str] = deque()
@@ -287,15 +294,53 @@ class TaskQueue:
         且「对于相同的 id，不会重复执行」——所以这里不需要（也不该）只给一次。
         只给一次反而危险：MAA 拿到后如果本地丢了状态，就再也取不到，而我们会
         以为它跑了。
+
+        **顺带带上待发的控制指令**（`StopTask` 等）：官方把它们归为「立即执行
+        任务」——「可以在顺序执行任务运行中执行」，所以必须和换班任务一起下发，
+        才能叫停一个**已经在跑**的任务。这正是「撤销了却依旧执行」那个 bug 的根因：
+        撤销只删了本地记录，没有把停止指令送出去。
         """
-        task = self._pending
-        if task is None:
-            return ()
         moment = now or self._clock()
-        if task.first_fetch_at is None:
-            task.first_fetch_at = moment
-        task.fetch_count += 1
-        return (task.body(),)
+        self._drop_expired_control(moment)
+
+        tasks: list[dict[str, str]] = []
+        task = self._pending
+        if task is not None:
+            if task.first_fetch_at is None:
+                task.first_fetch_at = moment
+            task.fetch_count += 1
+            tasks.append(task.body())
+        tasks.extend(body for body, _ in self._control)
+        return tuple(tasks)
+
+    # --- 控制指令 -----------------------------------------------------------
+
+    def enqueue_control(
+        self,
+        task_type: str,
+        *,
+        ttl_minutes: int = 10,
+        now: datetime | None = None,
+    ) -> dict[str, str]:
+        """排一条控制指令（目前只有 `StopTask`），返回它的任务体。
+
+        id 用随机 uuid：控制指令**不参与**「同一次换班 ⇒ 同一个 id」那套去重，
+        也**不影响班次计数**。刻意不复用 `task_id_for`——那会把指令和换班时刻绑定，
+        导致「撤销两次」中第二次因同 id 被 MAA 忽略。
+        """
+        moment = now or self._clock()
+        self._drop_expired_control(moment)
+        body = build_control_task(str(uuid.uuid4()), task_type)
+        self._control.append((body, moment + timedelta(minutes=ttl_minutes)))
+        return body
+
+    def _drop_expired_control(self, moment: datetime) -> None:
+        while self._control and self._control[0][1] <= moment:
+            self._control.popleft()
+
+    def pending_control_count(self) -> int:
+        """还没被清理的控制指令条数（诊断用）。"""
+        return len(self._control)
 
     # --- 结清 / 作废 ---------------------------------------------------------
 

@@ -541,6 +541,102 @@ def test_cancel_clears_the_queue(monkeypatch) -> None:
     assert asyncio.run(instance._web_get_task()) == {"tasks": []}
 
 
+def test_cancel_of_a_fetched_task_delivers_a_stop_instruction(monkeypatch) -> None:
+    """**用户报的那个 bug**：撤销一个已经被取走的任务，必须真的下发停止指令。
+
+    只清队列是不够的——任务进队列后**3 毫秒**就被 MAA 领走了（每秒轮询），
+    删本地记录拦不住它。所以这里断言的是「接线」：`_cmd_cancel` **确实调用了**
+    `enqueue_control`，而不只是队列层有这个能力。
+
+    这条测试是被可证伪验证逼出来的：上一版只测了队列层，于是把
+    `_cmd_cancel` 里那句调用拆掉，测试**依然是绿的**。
+    """
+    instance, _registered, sent = _boot(monkeypatch)
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa run")))
+
+    # MAA 取走它——这一步正是"撤销拦不住"的前提。
+    _patch_request(monkeypatch, body={})
+    fetched = asyncio.run(instance._web_get_task())
+    assert len(fetched["tasks"]) == 1
+    sent.clear()
+
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa cancel")))
+
+    _patch_request(monkeypatch, body={})
+    delivered = asyncio.run(instance._web_get_task())["tasks"]
+
+    assert [t["type"] for t in delivered] == ["StopTask"], (
+        "撤销一个已被取走的任务，必须把 StopTask 送出去"
+    )
+    text = _last_text(sent)
+    assert "StopTask" in text
+    assert "已停止" not in text, "官方只说「尝试」结束，不许把结果说死"
+
+
+def test_cancel_of_an_unfetched_task_sends_nothing_extra(monkeypatch) -> None:
+    """没被取走的任务：删掉即可，不该多发一条控制指令。"""
+    instance, _registered, _sent = _boot(monkeypatch)
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa run")))
+
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa cancel")))
+
+    _patch_request(monkeypatch, body={})
+    assert asyncio.run(instance._web_get_task())["tasks"] == []
+
+
+def test_skip_of_a_fetched_task_does_not_promise_the_index_stays(monkeypatch) -> None:
+    """**skip 的旧文案是假的**：它无条件保证「班次索引不会前进」。
+
+    但 `skip` 内部同样只走 withdraw，任务已经被取走时它拦不住——所以那句话
+    必须退成有条件的。这条测试盯的就是「不许把保证写成无条件的」。
+    """
+    instance, _registered, sent = _boot(monkeypatch)
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa run")))
+
+    _patch_request(monkeypatch, body={})
+    asyncio.run(instance._web_get_task())  # MAA 取走它
+    sent.clear()
+
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa skip")))
+
+    text = _last_text(sent)
+    assert "已经被 MAA 取走" in text, "必须说清它已交付、拦不住"
+    assert "不保证拦得住" in text
+    # 旧文案里的无条件保证不许再出现
+    assert "班次索引**不会前进**，与你的手动操作不会错位" not in text
+
+    # 而且要真的发了停止指令，不是只改说法
+    _patch_request(monkeypatch, body={})
+    assert [t["type"] for t in asyncio.run(instance._web_get_task())["tasks"]] == ["StopTask"]
+
+
+def test_skip_of_an_unfetched_task_keeps_the_promise(monkeypatch) -> None:
+    """没被取走时，那句保证是**真的**，应当保留。"""
+    instance, _registered, sent = _boot(monkeypatch)
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa run")))
+
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa skip")))
+
+    text = _last_text(sent)
+    assert "不会前进" in text
+    _patch_request(monkeypatch, body={})
+    assert asyncio.run(instance._web_get_task())["tasks"] == []
+
+
+def test_run_receipt_warns_that_it_will_be_taken_within_a_second(monkeypatch) -> None:
+    """确认的**当时**就要说清代价：约一秒后被取走，之后就撤不回来了。
+
+    把这句话放到事后（cancel 时）说，等于用文案掩盖——用户以为"先派上，不对再撤"。
+    """
+    instance, _registered, sent = _boot(monkeypatch)
+
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa run")))
+
+    text = _last_text(sent)
+    assert "一秒内被取走" in text
+    assert "没法「撤」" in text
+
+
 def test_unknown_subcommand_lists_the_usage(monkeypatch) -> None:
     instance, _registered, sent = _boot(monkeypatch)
 
