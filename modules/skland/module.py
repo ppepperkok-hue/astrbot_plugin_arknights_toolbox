@@ -74,8 +74,15 @@ PLUGIN_NAME = "astrbot_plugin_arknights_toolbox"
 POLL_INTERVAL_SECONDS = 2.0
 POLL_ATTEMPTS = 60
 
-#: 二维码像素倍率。登录链接约 60~70 字符，8 倍下约 330px——手机扫得动。
-QR_SCALE = 8
+#: 二维码像素倍率。登录链接约 60~70 字符（版本 4，41 模块含白边），
+#: 12 倍下约 492px。
+#:
+#: 为什么从 8 提到 12：8 倍只有 328px，扫码器读得动，但 **QQ 对 1:1 的方图
+#: 默认渲染成缩略图**——用户看到一条带字的气泡加一张小图，很容易当成装饰
+#: 滑过去（2026-09-29 真机反馈「没收到二维码」，而服务器侧证据显示图片段
+#: 确实发出去了、且 PNG 合法）。放大是为了让它**在聊天流里显眼**，
+#: 不是为了让扫码器读得动。
+QR_SCALE = 12
 
 SUBCOMMANDS = ("status", "login", "logout", "check", "signin")
 
@@ -390,7 +397,9 @@ class SklandModule(Module):
             await self._reply_with_image(
                 event,
                 png,
-                "用森空岛 App 扫这个码并确认授权。扫完我会自己回报结果（等约 2 分钟）。",
+                "用森空岛 App 扫这个码并确认授权。"
+                "**如果图太小，点开图片看大图**（QQ 会把方图缩略显示）。"
+                "扫完我会自己回报结果（等约 2 分钟）。",
             )
 
         self._login_task = asyncio.create_task(
@@ -547,6 +556,11 @@ class SklandModule(Module):
 
         图片走 `Image.fromBytes`（已核实其实现：内部转成 `base64://`），
         **不需要落临时文件**——少一个要清理的东西。
+
+        为什么成功也要记一行：2026-09-29 排查「二维码发不出去」时，唯一的
+        发送侧证据只有失败日志，**成功时反而无声**，于是无法区分「发了但用户
+        没看见」与「根本没发出去」。这一段是我们自己拼的（纯文本 + base64
+        图片段），加一行 INFO 就能让下次排查一眼定论。
         """
         if self._ctx is None:
             logger.warning("[ak_toolbox][skland] 模块尚未初始化，无法回执")
@@ -559,6 +573,12 @@ class SklandModule(Module):
             return
         if not sent:
             logger.warning("[ak_toolbox][skland] 发送二维码失败：平台返回未成功")
+            return
+        logger.info(
+            "[ak_toolbox][skland] 已发送二维码（%d 字节，%d 个消息段）",
+            len(png),
+            len(getattr(chain, "chain", ())),
+        )
 
     async def _send(self, umo: str, text: str) -> None:
         """给指定会话发文本。
