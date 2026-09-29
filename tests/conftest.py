@@ -14,8 +14,8 @@
 
 import base64
 import sys
+import tempfile
 import types
-from pathlib import Path
 from typing import Any
 
 
@@ -146,8 +146,15 @@ def _install_astrbot_stub() -> None:
             return default
 
     def get_astrbot_plugin_data_path() -> str:
-        """默认给一个不会污染仓库的位置；需要时由测试 monkeypatch 覆盖。"""
-        return str(Path.cwd() / ".pytest-plugin-data")
+        """默认给一个**仓库之外**的位置；需要时由测试 monkeypatch 覆盖。
+
+        这里原先返回 `Path.cwd() / ".pytest-plugin-data"`，而它的注释写着"不会污染
+        仓库"——**注释与代码说的是两件事**（那个目录就在仓库里，且不在 `.gitignore`
+        里）。2026-09-29 仓库里真的留下了未跟踪的 `.pytest-plugin-data/`（含模块
+        状态）。现在退到系统临时目录：即使某条路径绕过了下面的隔离夹具，也只会写在
+        仓库外面。
+        """
+        return tempfile.mkdtemp(prefix="ak-toolbox-test-data-")
 
     def json_response(payload: Any) -> Any:
         """原样返回，便于测试直接断言 handler 组装出来的数据。"""
@@ -200,3 +207,37 @@ def _install_astrbot_stub() -> None:
 
 
 _install_astrbot_stub()
+
+
+try:  # pragma: no cover - 没有 pytest 时（例如只跑加载形态脚本）跳过夹具定义
+    import pytest
+except ImportError:  # pragma: no cover
+    pytest = None  # type: ignore[assignment]
+
+
+if pytest is not None:
+
+    @pytest.fixture(autouse=True)
+    def _isolate_plugin_data(tmp_path, monkeypatch):
+        """把**插件数据目录**指到本次测试的临时目录：任何测试都不许写进仓库。
+
+        为什么需要它：`modules/*/module.py` 会在运行时往 `plugin_data/` 写东西
+        （绑定目标、去重记录、上传的排班表、共享班次表）。而上面 stub 给的默认值是
+        **仓库内**的 `.pytest-plugin-data`，那个路径**不在** `.gitignore` 里。
+        于是"顺手写一点状态"就会在仓库里留下未跟踪文件——`AGENTS.md` §5 第 6 条
+        要求的测试隔离并没有被真正保证（2026-09-29 发现的隐患）。
+
+        两层都要换：stub 里的那份（供**之后**才 import 的模块取用），以及**已经**
+        import 过的每个 `modules.*` 模块里的同名属性——`from ... import x` 在 import
+        那一刻就把名字抄进了模块命名空间，改 stub 影响不到它。
+
+        显式把数据目录指到 `tmp_path` 的用例不受影响：它们本来指的就是同一个目录。
+        """
+        target = str(tmp_path)
+        stub = sys.modules.get("astrbot.core.utils.astrbot_path")
+        if stub is not None:
+            monkeypatch.setattr(stub, "get_astrbot_plugin_data_path", lambda: target, raising=False)
+        for name, module in list(sys.modules.items()):
+            if name.startswith("modules.") and hasattr(module, "get_astrbot_plugin_data_path"):
+                monkeypatch.setattr(module, "get_astrbot_plugin_data_path", lambda: target)
+        yield

@@ -773,13 +773,53 @@ def test_a_notice_is_logged_when_there_is_nowhere_to_send_it(monkeypatch) -> Non
 # --- 定时任务：注册、清理、不碰别人的 ----------------------------------------
 
 
-def test_the_sweep_job_is_registered_under_this_module_s_prefix(monkeypatch) -> None:
+def test_the_sweep_and_auto_ask_jobs_are_registered_under_this_module_s_prefix(monkeypatch) -> None:
+    """两个定时任务都要带本模块前缀，**名字不能重复**。
+
+    2026-09-29 起多了一个：过期巡检（每 5 分钟）与到点询问（每分钟）。
+    两者都是 `ak_toolbox:maa:` 开头，所以 `terminate` 那套前缀清理照样覆盖它们
+    （见下面那条用例）。
+    """
     cron = _FakeCronManager()
 
     _boot(monkeypatch, cron_manager=cron)
 
-    assert [kwargs["name"] for kwargs in cron.added] == [maa_module.SWEEP_JOB_NAME]
-    assert maa_module.SWEEP_JOB_NAME.startswith(maa_module.JOB_PREFIX)
+    names = [kwargs["name"] for kwargs in cron.added]
+    assert names == [maa_module.SWEEP_JOB_NAME, maa_module.AUTO_ASK_JOB_NAME]
+    assert len(set(names)) == len(names), "两个任务名不能撞，否则注册会互相覆盖"
+    for name in names:
+        assert name.startswith(maa_module.JOB_PREFIX)
+
+
+def test_auto_ask_job_is_registered_even_when_the_switch_is_off(monkeypatch) -> None:
+    """开关关着也**注册**那个任务——否则在面板上打开它不会立刻生效。
+
+    用户把开关打开走的是 `apply_config`，而它只更新内存里的配置、**不会重新注册
+    定时任务**。若按开关决定注不注册，用户打开后会看到状态写着「开」而实际没人
+    在跑——一句假话，而且不会报错。关着时的代价只是每分钟醒一次、第一行就返回。
+    """
+    cron = _FakeCronManager()
+
+    _boot(monkeypatch, config={"auto_ask": False}, cron_manager=cron)
+
+    names = [kwargs["name"] for kwargs in cron.added]
+    assert names == [maa_module.SWEEP_JOB_NAME, maa_module.AUTO_ASK_JOB_NAME]
+
+
+def test_purge_happens_once_before_both_registrations(monkeypatch) -> None:
+    """**清历史任务只能清一次、而且在两个注册之前**。
+
+    两个注册各自先清一次的话，第二个会把刚注册的第一个删掉——"看起来两个都在、
+    实际只剩一个"，而且不会报错。这条断言把那个顺序钉住。
+    """
+    cron = _FakeCronManager()
+    cron.jobs.append(_FakeJob(f"{maa_module.JOB_PREFIX}stale", "stale-1"))
+
+    _boot(monkeypatch, cron_manager=cron)
+
+    assert cron.deleted.count("stale-1") == 1, f"重复清理了：{cron.deleted}"
+    assert "stale-1" not in {job.job_id for job in cron.jobs}
+    assert {job.job_id for job in cron.jobs} == {"job-1", "job-2"}
 
 
 def test_terminate_removes_its_own_jobs(monkeypatch) -> None:
@@ -788,7 +828,7 @@ def test_terminate_removes_its_own_jobs(monkeypatch) -> None:
 
     asyncio.run(instance.terminate())
 
-    assert cron.deleted == ["job-1"]
+    assert cron.deleted == ["job-1", "job-2"]
     assert cron.jobs == []
 
 

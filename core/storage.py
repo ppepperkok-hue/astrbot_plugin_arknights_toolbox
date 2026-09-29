@@ -31,6 +31,36 @@ class CorruptedStoreError(RuntimeError):
     """
 
 
+def write_json_atomic(path: Path, payload: Any) -> None:
+    """把一份 JSON 文档**原子**写到 ``path``。
+
+    做法是「临时文件 + ``os.replace``」：先在同目录写 ``<name>.tmp``，再整体换过去。
+    任何时刻磁盘上的正式文件要么是旧内容、要么是新内容，**不会出现半截 JSON**
+    ——读取方（可能是另一个模块）因此永远不会解析到写了一半的内容。
+
+    为什么它是模块级函数而不是 `JsonStateStore` 的私有方法：跨模块共享的那份
+    「班次表」也要原子写（见 `core/shift_share.py`），而且它**不是**键值存档
+    （每次整份覆盖，不该先把旧内容读进来合并）。两份实现迟早分叉，所以原子写的
+    实现只有这一处，`JsonStateStore._write` 也走它。
+
+    Args:
+        path: 目标文件；父目录不存在时会被创建。
+        payload: 任何可被 ``json.dumps`` 序列化的对象。
+    """
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = target.with_name(f"{target.name}.tmp")
+    try:
+        tmp_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        os.replace(tmp_path, target)
+    finally:
+        # 成功时 os.replace 已经把临时文件搬走；失败时把它清掉，不留垃圾。
+        tmp_path.unlink(missing_ok=True)
+
+
 @dataclass(frozen=True)
 class SendRecord:
     """一次推送的留痕。
@@ -128,17 +158,9 @@ class JsonStateStore:
         return data
 
     def _write(self, data: dict[str, Any]) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._path.with_name(f"{self._path.name}.tmp")
-        try:
-            tmp_path.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True),
-                encoding="utf-8",
-            )
-            os.replace(tmp_path, self._path)
-        finally:
-            # 成功时 os.replace 已经把临时文件搬走；失败时把它清掉，不留垃圾。
-            tmp_path.unlink(missing_ok=True)
+        # 原子写的实现只有一处（见 `write_json_atomic`）：这里不重复那段
+        # 「临时文件 + os.replace」，否则两边迟早分叉。
+        write_json_atomic(self._path, data)
 
 
 class JsonlSendLog:

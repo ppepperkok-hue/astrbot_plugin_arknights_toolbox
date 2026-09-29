@@ -169,7 +169,9 @@
     "default": {
       "task_type": "LinkStart",
       "task_ttl_minutes": 30,
-      "fetched_ttl_minutes": 240
+      "fetched_ttl_minutes": 240,
+      "auto_ask": true,
+      "auto_ask_grace_minutes": 10
     },
     "items": {
       "task_type": {
@@ -189,6 +191,18 @@
         "description": "取走后等待回报的时间（分钟）",
         "hint": "MAA 取走任务后，等多久还没汇报就视为它没回话。默认 240 分钟（跑一整套可能很久，别设太短）。这种情况下不再补派——它多半已经跑过了，再派一次就是多跑一趟。",
         "default": 240
+      },
+      "auto_ask": {
+        "type": "bool",
+        "description": "到换班时刻主动问你一次",
+        "default": true,
+        "hint": "开启后，每到换班时刻会给你发一条「要不要让 MAA 跑一次」。**它只是问，不会自己派任务**——你回 /ak maa run 才算；不回就是不跑。⚠️ 它读的是换班提醒模块写下的班次表，所以那个模块要开着；读不到时状态里会说明（手动 /ak maa run 不受影响）。"
+      },
+      "auto_ask_grace_minutes": {
+        "type": "int",
+        "description": "询问的宽限窗口（分钟）",
+        "hint": "「换班时刻已经过去多久，仍然补问一次」。默认 10 分钟，用来兜住插件刚好在换班那一刻重启的情况（只认「正好这一分钟」会让那次换班永远不被问）。设为 0 就是只认正好那一分钟。⚠️ 别设得比最短的班次还长，否则会把上一次换班误认成这一次。",
+        "default": 10
       }
     }
   }

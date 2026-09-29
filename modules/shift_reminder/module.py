@@ -26,26 +26,32 @@ try:  # pragma: no cover - 走哪支取决于运行场景，两支都是真实�
     from core.config import is_unset, setting
     from core.module import Module
     from core.permission import session_allowed
+    from core.shift_share import SharedShiftError, dump_shared, shared_shift_path
     from core.shifts import (
         SHIFT_SLOTS,
         ConfigError,
+        Shift,
         ShiftTable,
+        load_timezone,
         parse_shift_slots,
         parse_shift_table,
     )
-    from core.storage import JsonlSendLog, JsonStateStore, SendRecord
+    from core.storage import JsonlSendLog, JsonStateStore, SendRecord, write_json_atomic
 except ImportError:  # pragma: no cover
     from ...core.config import is_unset, setting
     from ...core.module import Module
     from ...core.permission import session_allowed
+    from ...core.shift_share import SharedShiftError, dump_shared, shared_shift_path
     from ...core.shifts import (
         SHIFT_SLOTS,
         ConfigError,
+        Shift,
         ShiftTable,
+        load_timezone,
         parse_shift_slots,
         parse_shift_table,
     )
-    from ...core.storage import JsonlSendLog, JsonStateStore, SendRecord
+    from ...core.storage import JsonlSendLog, JsonStateStore, SendRecord, write_json_atomic
 from . import avatars, notify, roster, scheduler, webapi
 from .schedule_file import ScheduleFileError, parse_schedule_file
 from .strategy import PeriodStrategy
@@ -125,15 +131,15 @@ def parse_lead_minutes(config: Mapping[str, Any]) -> int:
 def _load_timezone(key: str) -> ZoneInfo | None:
     """解析时区名；本机没有时区数据时返回 `None`。
 
-    刻意用 `zoneinfo` 而不是别的库：AstrBot 的调度器
-    （`core/cron/manager.py:235`）注册任务时正是用 `ZoneInfo(job.timezone)` 解析，
-    **取不到就只打一条 WARNING、然后回落到系统时区**。用同一个机制校验，才不会
-    出现「我们说它合法、它却悄悄换了个时区」的错位。
+    **这里不含实现**：一行转发到 `core.shifts.load_timezone`。班次模型与那份跨模块
+    共享的班次表都带着时区名，两边的"现在几点"必须由**同一套判定**得出，否则会
+    悄悄落在不同的钟点上。转发而不是复制，是为了让"到底有几份实现"一眼可数。
+
+    之所以保留这个模块级名字：测试通过替换它来模拟「本机没有时区数据」这台机器，
+    那是**真实存在**的运行环境（Windows、精简镜像）。直接调 core 的话，那些用例
+    就构造不出这个场景了。
     """
-    try:
-        return ZoneInfo(key)
-    except Exception:  # noqa: BLE001 - 失败原因不止一种：无数据 / 名字非法 / 路径非法
-        return None
+    return load_timezone(key)
 
 
 def parse_timezone(config: Mapping[str, Any]) -> str:
@@ -231,6 +237,10 @@ class ShiftReminderModule(Module):
         self._configured_minutes: tuple[int, ...] = ()
         # `/ak import` 只认这个目录里的文件；由 initialize 填好（见 resolve_import_path）。
         self._data_dir: Path | None = None
+        # 插件数据目录的**根**（`plugin_data/`，不含插件名）。共享班次表的路径由
+        # `core.shift_share.shared_shift_path(根, 插件名)` 算——两端必须传同一个根，
+        # 传错一层（例如把已经带插件名的目录再当根）会静默地写到一个没人读的位置。
+        self._data_root: Path | None = None
         # 干员头像映射（中文名 → 外链 URL）。装载失败时为 None，页面退回首字色块——
         # 头像只是锦上添花，**绝不能因为它让插件加载失败**。
         self._avatars: avatars.AvatarIndex | None = None
@@ -240,11 +250,13 @@ class ShiftReminderModule(Module):
     async def initialize(self, ctx: Any, config: Mapping[str, Any]) -> None:
         table = parse_shift_table(config)
         shift_order = parse_shift_order(config)
-        slot_minutes = tuple(shift.duration_minutes for shift in parse_shift_slots(config))
+        slots = parse_shift_slots(config)
+        slot_minutes = tuple(shift.duration_minutes for shift in slots)
         lead_minutes = parse_lead_minutes(config)
         timezone = parse_timezone(config)
 
-        data_dir = Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME
+        data_root = Path(get_astrbot_plugin_data_path())
+        data_dir = data_root / PLUGIN_NAME
         data_dir.mkdir(parents=True, exist_ok=True)
 
         cron_manager = getattr(ctx, "cron_manager", None)
@@ -261,12 +273,17 @@ class ShiftReminderModule(Module):
         self._shift_order = shift_order
         self._configured_minutes = slot_minutes
         self._data_dir = data_dir
+        self._data_root = data_root
         self._store = JsonStateStore(data_dir / "state.json")
         self._send_log = JsonlSendLog(data_dir / "sends.jsonl", keep=SEND_LOG_KEEP)
         self._job_ids = []
         self._avatars = self._load_avatars()
 
         await self._register_jobs(cron_manager, table, lead_minutes, timezone)
+
+        # 导出放在**注册之后**：注册失败会让 initialize 抛错、宿主回滚整个模块，
+        # 那时不该在盘上留下一份"看起来配置已生效"的班次表（另一个模块会照它询问）。
+        self._export_shared_table(data_root, slots, timezone)
 
         # 放在最后注册：前面任何一步失败都会让 initialize 抛出并被宿主回滚，
         # 此时页面路由不该已经指向一个没初始化完的实例。
@@ -353,7 +370,8 @@ class ShiftReminderModule(Module):
 
         table = parse_shift_table(config)
         shift_order = parse_shift_order(config)
-        slot_minutes = tuple(shift.duration_minutes for shift in parse_shift_slots(config))
+        slots = parse_shift_slots(config)
+        slot_minutes = tuple(shift.duration_minutes for shift in slots)
         lead_minutes = parse_lead_minutes(config)
         timezone = parse_timezone(config)
 
@@ -363,6 +381,60 @@ class ShiftReminderModule(Module):
         self._shift_order = shift_order
         self._configured_minutes = slot_minutes
         await self._register_jobs(cron_manager, table, lead_minutes, timezone)
+        # 改了时刻就要立刻让另一个模块看到——否则它会按旧时刻询问，
+        # 而那正是「两份时刻漂移」那个 bug 的另一种形态（这里是时间维度的漂移）。
+        if self._data_root is not None:
+            self._export_shared_table(self._data_root, slots, timezone)
+
+    def _export_shared_table(
+        self, data_root: Path, slots: tuple[Shift, ...], timezone: str
+    ) -> None:
+        """把**已校验**的班次表写进 `plugin_data/`，供 `maa` 只读。
+
+        为什么要导出这一份：`maa` 要在换班时刻问用户要不要让 MAA 跑一次，而班次时刻
+        只在**本模块的配置段**里——宿主只给每个模块自己那一段（`extension.md` §2），
+        模块之间也不许互相 import。写入方**只有这一处**，所以「什么时候该换班」仍然
+        只有一个来源；格式与解析在 `core/shift_share.py`，两端共用一套。
+
+        **失败不影响提醒**：导出只是给另一个模块的便利，写不进去就记一条 WARNING
+        并继续——提醒照常注册、照常推送（本项目「外部依赖坏了不许拖垮核心」那条铁律）。
+        用户可见的后果（MAA 的到点询问不工作）在那个模块的状态里会说，不在这里重复。
+
+        **刻意不在 `terminate` 里删掉它**：删了会在插件重载期间造出一个"文件不存在"
+        的窗口；万一新旧实例的时序不是我们设想的那样，自动询问就会**永久**停在一个
+        没人再写文件的状态——那种静默失效比"停用后仍留着一份最后发布的排班"坏得多。
+        代价是这份表可能陈旧，而它的 `generated_at` 会如实告诉读的人是什么时候写的。
+
+        Args:
+            data_root: 插件数据目录的**根**（`plugin_data/`，不含插件名）——
+                与读取方传给 `shared_shift_path` 的是同一个值；传错一层会写到一个
+                没人读的位置（`shared_shift_path` 的契约里写明了这一点）。
+            slots: **槽位顺序**的三班（`parse_shift_slots` 的结果）。
+            timezone: 已校验的 IANA 时区名。
+
+        Note:
+            调用点都在 `parse_shift_table` **成功之后**，所以这里导出的一定是合法配置
+            ——这个保证来自调用顺序，别把它挪到校验之前。
+        """
+        path = shared_shift_path(data_root, PLUGIN_NAME)
+        try:
+            payload = dump_shared(slots, timezone=timezone, generated_at=self._now())
+            write_json_atomic(path, payload)
+        except (SharedShiftError, OSError, ValueError) as exc:
+            logger.warning(
+                "[ak_toolbox][shift_reminder] 导出共享班次表失败（%s）：%s。"
+                "换班提醒本身不受影响；但 MAA 模块的「到点询问」会因为没有它而不工作。",
+                path.name,
+                exc,
+            )
+            return
+        logger.info(
+            "[ak_toolbox][shift_reminder] 已导出共享班次表 %s（%d 个班次，时区 %s），"
+            "供 MAA 模块在换班时刻询问",
+            path.name,
+            len(slots),
+            timezone,
+        )
 
     async def _purge_stale_jobs(self, cron_manager: Any) -> int:
         """删掉上一条进程遗留的定时任务，返回清掉的条数。

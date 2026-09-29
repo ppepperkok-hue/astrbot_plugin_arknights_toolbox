@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from .autoask import DueAsk
 from .queue import EnqueueResult, PendingTask, SweepNotice, SweepReason
 from .tasks import task_type_label
 
@@ -26,6 +27,7 @@ __all__ = [
     "HELP",
     "already_done_text",
     "already_pending_text",
+    "auto_ask_text",
     "cancelled_text",
     "inline_hint",
     "no_pending_text",
@@ -41,7 +43,8 @@ HELP = (
     "/ak maa —— 看状态（连上没有、队列里有什么、最近回报）\n"
     "/ak maa run —— 让它跑一次：排一个任务，等 MAA 下次来取\n"
     "/ak maa skip —— 这一班我自己换，不给 MAA 派任务\n"
-    "/ak maa cancel —— 撤掉还没被取走的任务"
+    "/ak maa cancel —— 撤掉还没被取走的任务\n"
+    "（到换班时刻它会主动问你一次要不要让它跑；那只是提醒，你回了才算。）"
 )
 
 #: 首次接触时的一句话提示。它是**说明白边界**的地方：我们只能让它跑。
@@ -205,6 +208,38 @@ def stopped_text(*, confirmed: bool, slot_label: str = "") -> str:
 
 def no_pending_text() -> str:
     return "队列里没有待取的任务。想派一个就用 /ak maa run。"
+
+
+def auto_ask_text(due: DueAsk) -> str:
+    """到换班时刻主动问的那一条。
+
+    ⚠️ 三条约束（改文案前先读）：
+
+    1. **只说"要不要让它跑一次"**，不许出现「帮你切到第 N 班」这类承诺——
+       协议里没有班次字段（`10-maa-shift-switching.md` §4.1）。
+    2. **说清"不回就是不跑"**：询问不是派单，用户不回答就该什么都不发生。
+       含糊其辞会让用户以为"它大概自己会跑"，而它不会。
+    3. **迟到了要说迟到几分钟**：重启过之后询问可能晚几十秒到几分钟才发出，
+       不说明的话用户会怀疑是我们时区算错了（而不是"刚好重启过"）。
+    """
+    when = due.moment.strftime("%m-%d %H:%M")
+    late = (
+        "" if due.minutes_ago <= 0 else f"（这条晚发了 {due.minutes_ago} 分钟，多半是插件刚重启过）"
+    )
+    return "\n".join(
+        [
+            f"【该换班了】{due.name} 从 {when} 开始。{late}",
+            "",
+            "要我让 MAA 在你电脑上跑一次吗？",
+            "要它跑 → 回 /ak maa run",
+            "你自己换 → 回 /ak maa skip",
+            "",
+            "**不回就是「不跑」**：我不会催，也不会自己派任务——队列在你确认之前一直是空的。",
+            "⚠️ 它每跑完一次，班次就按 MAA 自己的规则前进一格（写进它的配置、不会自动纠正），"
+            "所以**一次换班只该跑一趟**。",
+            inline_hint,
+        ]
+    )
 
 
 def report_text(*, status: str, slot_label: str, payload_shape: str = "") -> str:

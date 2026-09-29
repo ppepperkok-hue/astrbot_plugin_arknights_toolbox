@@ -29,6 +29,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 MINUTES_PER_DAY = 24 * 60
 
@@ -217,3 +218,25 @@ def parse_shift_table(config: Mapping[str, Any]) -> ShiftTable:
         三班（例如按 ``plans`` 下标对齐排班表），用 :func:`parse_shift_slots`。
     """
     return validate(parse_shift_slots(config))
+
+
+def load_timezone(name: str) -> ZoneInfo | None:
+    """按名字取时区；**本机解析不了**（名字非法，或这台机器没有时区数据）时返回 ``None``。
+
+    为什么它属于班次模型而不是某个模块的私事：**"某个时刻"只在给定时区下才有意义**。
+    班次时刻、以及那份跨模块共享的班次表，都带着时区名；读取方必须是**同一套判定**，
+    否则两个模块对"现在几点"会得出不同答案——而那种差异**不会报错**，只会让提醒与
+    询问落在不同的钟点上（正是本项目最怕的静默错位）。
+
+    刻意用 `zoneinfo`：AstrBot 的调度器注册任务时正是 ``ZoneInfo(job.timezone)``，
+    取不到就只打一条 WARNING 然后回落到系统时区。用同一个机制校验，才不会出现
+    「我们说它合法、它却悄悄换了个时区」的错位。
+
+    返回 ``None`` **不区分**「名字写错」与「本机缺时区数据」——那需要调用方结合
+    「默认值能不能解析」来判断，见 `modules/shift_reminder/module.py` 的
+    ``parse_timezone``（它承担那层判断，本函数只做一件小事）。
+    """
+    try:
+        return ZoneInfo(name)
+    except Exception:  # noqa: BLE001 - 失败原因不止一种：无数据 / 名字非法 / 路径非法
+        return None
