@@ -319,19 +319,240 @@ def test_the_exact_online_failure_shape_is_now_fully_diagnosable(
     assert recorded.lines, "失败必须写日志——线上那次就是日志里什么都没有"
 
 
-def test_poll_failure_is_attributed_to_step_two(
+def test_poll_transport_failure_is_attributed_to_step_two(
     data_root: Path, recorded: _RecordingLogger, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """轮询**真的失败**时（网络层报错）仍要能定位到第 2 步。
+
+    注意这里用「传输层抛异常」而不是「某个没见过的 `status`」来造失败：后者在本包
+    被改成了**继续等**——真实存在的等待态 `status=101` 当时就是被"未知 → 失败"那条
+    规则掐死的（见 `test_the_measured_pending_status_keeps_polling`）。
+    """
     monkeypatch.setattr(skland_module, "POLL_INTERVAL_SECONDS", 0)
     monkeypatch.setattr(skland_module, "POLL_ATTEMPTS", 2)
-    transport = _StepTransport(login.STEP_POLL, {"status": 5, "msg": "未知状态"}, 200)
+
+    def transport(method: str, url: str, headers: Any, body: bytes | None) -> Any:
+        raise api.SklandTransportError("网络请求失败：ConnectionResetError: boom")
+
     module, _ = _module_with(transport, data_root)
 
     asyncio.run(module._poll_scan(_Event(), INVITE_TICKET, "test:FriendMessage:1"))
 
     output = recorded.joined
     assert "第 2 步" in output
-    assert "未知状态" in output
+    assert "轮询扫码状态" in output
+
+
+def test_the_measured_pending_status_keeps_polling(
+    data_root: Path, recorded: _RecordingLogger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**本包的核心断言**：`status=101`（已扫码待确认）**不许中止轮询**。
+
+    线上现场：用户扫了码，服务端回 `status=101；msg='已扫码待确认'`，我们判成失败、
+    轮询当场结束——**他随后在手机上点确认时，已经没有任何人在等那个结果了**。
+    所以这里钉两件事：① 没有失败回执；② 轮询**继续尝试**（请求次数 > 1）。
+    """
+    monkeypatch.setattr(skland_module, "POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(skland_module, "POLL_ATTEMPTS", 5)
+
+    polls: list[str] = []
+
+    def transport(method: str, url: str, headers: Any, body: bytes | None) -> Any:
+        if "scan_status" in url:
+            polls.append(url)
+        return _response({"msg": "已扫码待确认", "status": 101, "type": "A"})
+
+    module, ctx = _module_with(transport, data_root)
+
+    asyncio.run(module._poll_scan(_Event(), INVITE_TICKET, "test:FriendMessage:1"))
+
+    joined = "\n".join(ctx.sent)
+    # 失败回执**一律以这个前缀开头**（`_report_failure` 拼的），所以按"形状"判，
+    # 而不是按某个词是否出现——超时的措辞里也可能出现相似的词，子串断言会误报。
+    # （本项目栽过同类跟头：一条永远通过的子串断言。）
+    assert not any(m.startswith("授权没走完") for m in ctx.sent), f"等待态不许报失败：{joined}"
+    assert "失败" not in recorded.joined, f"等待态不许记失败日志：{recorded.joined}"
+    assert len(polls) > 1, "等待态必须继续轮询（线上就是在这里停掉的）"
+    # 状态变化要留痕，且带出实测的状态值与服务端消息
+    assert "awaiting_confirmation" in recorded.joined
+    assert "已扫码待确认" in recorded.joined
+
+
+def test_the_user_is_told_to_confirm_when_the_scan_is_seen(
+    data_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """扫到之后要**准确**告诉用户该干什么：看手机点确认，而不是"再扫一次"。"""
+    monkeypatch.setattr(skland_module, "POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(skland_module, "POLL_ATTEMPTS", 3)
+
+    def transport(method: str, url: str, headers: Any, body: bytes | None) -> Any:
+        return _response({"msg": "已扫码待确认", "status": 101, "type": "A"})
+
+    module, ctx = _module_with(transport, data_root)
+
+    asyncio.run(module._poll_scan(_Event(), INVITE_TICKET, "test:FriendMessage:1"))
+
+    joined = "\n".join(ctx.sent)
+    assert "确认" in joined
+    # 只说一次，不刷屏（3 次轮询里那条提示只该出现一遍）
+    assert joined.count("已经扫到码了") == 1, joined
+
+
+def test_an_unrecognized_status_keeps_polling_end_to_end(
+    data_root: Path, recorded: _RecordingLogger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**一个我们不认识的 `status` 也不许中止轮询**——端到端跑一遍真实的轮询循环。
+
+    为什么单列这条：上面那条用的是实测的 `101`，它走的是"已扫待确认"分支；**默认分支
+    （未知状态）根本没被走到**。这是做可证伪实验时发现的缺口——把默认分支改回"终态"，
+    上面那条**照样全绿**。而默认分支恰恰是这次事故的形状：当时真实的 `101` 对我们来说
+    就是"不认识的值"。
+
+    所以这里注入一个**从未见过的** `status=7`，钉住三件事：轮询继续、没有失败回执、
+    超时说法仍是"二维码超时了"（因为我们确实没扫到）。
+    """
+    monkeypatch.setattr(skland_module, "POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(skland_module, "POLL_ATTEMPTS", 4)
+
+    polls: list[str] = []
+
+    def transport(method: str, url: str, headers: Any, body: bytes | None) -> Any:
+        if "scan_status" in url:
+            polls.append(url)
+        return _response({"status": 7, "msg": "说不清的状态", "type": "A"})
+
+    module, ctx = _module_with(transport, data_root)
+
+    asyncio.run(module._poll_scan(_Event(), INVITE_TICKET, "test:FriendMessage:1"))
+
+    assert len(polls) == 4, f"未知状态必须一直等到轮询窗口用完，实际只问了 {len(polls)} 次"
+    assert not any(m.startswith("授权没走完") for m in ctx.sent), f"未知状态不许报失败：{ctx.sent}"
+    assert "失败" not in recorded.joined, f"不许记失败日志：{recorded.joined}"
+    # 原始状态值要留痕，否则下次又变成"日志里什么都没有"
+    assert "status=7" in recorded.joined
+    assert "说不清的状态" in recorded.joined
+    assert "二维码超时了" in "\n".join(ctx.sent)
+
+
+def test_scan_code_arriving_after_the_pending_state_completes_the_login(
+    data_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**用户点确认之后必须还有人在等**：先 pending，后拿到 `scanCode`，流程要走完。
+
+    这是把线上那次失败真正修好的证据——旧代码在第一个 pending 就 return 了，
+    这条的后半段（换 token → grant → cred）**根本没有机会执行**。
+    """
+    monkeypatch.setattr(skland_module, "POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(skland_module, "POLL_ATTEMPTS", 5)
+
+    polls: list[str] = []
+
+    def transport(method: str, url: str, headers: Any, body: bytes | None) -> Any:
+        if "gen_scan/login" in url:
+            return _ok({"scanId": INVITE_TICKET, "scanUrl": "hypergryph://scan_login?scanId=x"})
+        if "scan_status" in url:
+            polls.append(url)
+            if len(polls) == 1:
+                return _response({"msg": "已扫码待确认", "status": 101, "type": "A"})
+            # 用户在手机上点了确认；status 用的仍是**同一个没被实测过的值**，
+            # 为的是证明成功判据不依赖它——只看 scanCode 在不在。
+            return _response(
+                {"msg": "已扫码待确认", "status": 101, "data": {"scanCode": SCAN_CODE}}
+            )
+        if "token_by_scan_code" in url:
+            return _ok({"token": PASSPORT_TOKEN})
+        if "oauth2/v2/grant" in url:
+            return _ok({"code": GRANT_CODE})
+        if "player/binding" in url:
+            return _response({"code": 0, "data": {"uid": "u-9"}})
+        return _response({"code": 0, "data": {"cred": CRED_VALUE, "token": FRESH_TOKEN}})
+
+    module, ctx = _module_with(transport, data_root)
+
+    asyncio.run(module._poll_scan(_Event(), INVITE_TICKET, "test:FriendMessage:1"))
+
+    joined = "\n".join(ctx.sent)
+    assert "授权成功" in joined, joined
+    assert len(polls) == 2, "应当在第二次轮询拿到 scanCode"
+    # 凭据不许出现在回执里
+    _assert_no_leak(joined)
+    assert module._store is not None
+    assert module._store.status().usable
+
+
+def test_pending_then_timeout_says_the_user_never_confirmed(
+    data_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """扫到了却始终没确认，超时的说法**要与"一直没扫"不同**。
+
+    用户这时候以为自己已经做完了（或者只是忘了点），只说「超时了」他会以为二维码坏了。
+    """
+    monkeypatch.setattr(skland_module, "POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(skland_module, "POLL_ATTEMPTS", 1)
+    # 延长窗口也压到 0，免得测试真的多转 30 圈
+    monkeypatch.setattr(skland_module, "CONFIRMATION_GRACE_ATTEMPTS", 0)
+
+    def transport(method: str, url: str, headers: Any, body: bytes | None) -> Any:
+        return _response({"msg": "已扫码待确认", "status": 101, "type": "A"})
+
+    module, ctx = _module_with(transport, data_root)
+
+    asyncio.run(module._poll_scan(_Event(), INVITE_TICKET, "test:FriendMessage:1"))
+
+    joined = "\n".join(ctx.sent)
+    assert "确认" in joined
+    assert "二维码超时了" not in joined, "扫到过就不能说'二维码超时'——那会让人以为码坏了"
+
+
+def test_never_scanned_timeout_keeps_the_original_wording(
+    data_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """一直没扫到，超时说法照旧（这里才是"二维码超时了"）。"""
+    monkeypatch.setattr(skland_module, "POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(skland_module, "POLL_ATTEMPTS", 1)
+
+    def transport(method: str, url: str, headers: Any, body: bytes | None) -> Any:
+        return _response({"msg": "未扫码", "status": 100, "type": "A"})
+
+    module, ctx = _module_with(transport, data_root)
+
+    asyncio.run(module._poll_scan(_Event(), INVITE_TICKET, "test:FriendMessage:1"))
+
+    joined = "\n".join(ctx.sent)
+    assert "二维码超时了" in joined
+    assert "/ak skland login" in joined
+
+
+def test_scan_code_after_pending_never_leaks_credentials(
+    data_root: Path, recorded: _RecordingLogger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """等待态＋成功态混在一起时，**日志与回执都不许出现凭据**。
+
+    单独钉一条是因为这次改动让"成功"第一次可能在 `status=101` 下发生——多了一种
+    进入成功分支的路径，就多一次泄露的机会。
+    """
+    monkeypatch.setattr(skland_module, "POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(skland_module, "POLL_ATTEMPTS", 3)
+
+    polls: list[str] = []
+
+    def transport(method: str, url: str, headers: Any, body: bytes | None) -> Any:
+        if "scan_status" in url:
+            polls.append(url)
+            if len(polls) == 1:
+                return _response({"msg": "已扫码待确认", "status": 101, "type": "A"})
+            return _response({"status": 101, "data": {"scanCode": SCAN_CODE}})
+        if "token_by_scan_code" in url:
+            return _ok({"token": PASSPORT_TOKEN})
+        if "oauth2/v2/grant" in url:
+            return _ok({"code": GRANT_CODE})
+        return _response({"code": 0, "data": {"cred": CRED_VALUE, "token": FRESH_TOKEN}})
+
+    module, ctx = _module_with(transport, data_root)
+
+    asyncio.run(module._poll_scan(_Event(), INVITE_TICKET, "test:FriendMessage:1"))
+
+    _assert_no_leak(recorded.joined, "\n".join(ctx.sent))
 
 
 def test_poll_logs_every_new_state_shape(
@@ -510,15 +731,14 @@ def test_data_url_prefixed_scan_code_is_unwrapped() -> None:
 # --- 五、轮询状态语义的修正（顺带查出的真 bug） -----------------------------
 
 
-def test_scanned_but_unconfirmed_is_not_a_failure() -> None:
-    """`status == 0` 但还没有 `scanCode` = **已扫码、等手机确认**，不是失败。
+def test_scanned_but_unconfirmed_is_the_measured_pending_status_not_a_failure() -> None:
+    """**实测的** `status=101`「已扫码待确认」= 已扫、等确认，**不是失败**。
 
-    此前它落进"未知状态 → FAILED"那一支，会给用户一句「扫码失败」——**用户会以为
-    二维码坏了而放弃**，而实际上他只是还没在手机上点确认。参考实现（MIT）明确把
-    这个形态当中间态继续等。
+    这条以前用的是参考实现的 `status=0`。现在改用**实测报文形态**：参考实现的码与
+    本服务器不一致，而把参考实现当事实正是这次事故的根因之一。
     """
-    reading = login.interpret_scan_status({"status": 0, "type": "A"})
-    assert reading.state is login.ScanState.WAITING
+    reading = login.interpret_scan_status({"msg": "已扫码待确认", "status": 101, "type": "A"})
+    assert reading.state is login.ScanState.AWAITING_CONFIRMATION
     assert "确认" in reading.message
 
 
@@ -529,10 +749,17 @@ def test_expired_status_is_its_own_state_not_a_generic_failure() -> None:
     assert reading.message
 
 
-def test_unknown_status_without_scan_code_is_still_a_failure() -> None:
-    """未知状态**仍然如实报失败**——修上面那条不许把它连坐成"永远在等"。"""
+def test_unknown_status_without_scan_code_is_not_judged_dead() -> None:
+    """未知状态**继续等**，不再判死。
+
+    这条以前断言的是 FAILED（当时的理由是"修等待态不许把它连坐成永远在等"）。实测
+    `101` 之后那条理由不成立了：**我们手上的状态值域本来就不全**，把"不认识"当成
+    "失败"就是在用未知当证据。代价不对称——多等一会儿只是慢，误判会掐死授权。
+    """
     reading = login.interpret_scan_status({"status": 5, "msg": "说不清"})
-    assert reading.state is login.ScanState.FAILED
+    assert reading.state is login.ScanState.WAITING
+    assert reading.raw_status == 5
+    assert reading.message == "说不清"
 
 
 def test_expired_state_reaches_the_user_with_a_resend_hint(

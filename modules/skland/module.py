@@ -74,6 +74,14 @@ PLUGIN_NAME = "astrbot_plugin_arknights_toolbox"
 POLL_INTERVAL_SECONDS = 2.0
 POLL_ATTEMPTS = 60
 
+#: 用户**已经扫到码**之后，额外给多少次轮询等他在手机上点确认。
+#:
+#: 为什么需要它：`POLL_ATTEMPTS` 对应的是**二维码有效期**（约 2 分钟）。可一旦用户
+#: 扫到了码，**有效期就不再是约束**——他已经扫过了，剩下的是他去另一个 App 上点一下。
+#: 若他恰好在第 110 秒才扫到，原来的窗口只剩 10 秒，他还没点完我们就超时了。
+#: 30 次 × 2 秒 = **再给 60 秒**，只在他真的扫到之后才启用。
+CONFIRMATION_GRACE_ATTEMPTS = 30
+
 #: 二维码像素倍率。登录链接约 60~70 字符（版本 4，41 模块含白边），
 #: 12 倍下约 492px。
 #:
@@ -462,10 +470,24 @@ class SklandModule(Module):
 
         记的是**状态取值与键名**，不是响应原文——`scan_status` 一旦成功就带
         `scanCode`（凭据），整段响应进日志就泄露了。
+
+        ## 2026-09-29 的事故：等待态被误判成失败，轮询提前中止
+
+        服务端在用户**已扫到、还没在手机上确认**时返回 `status=101`「已扫码待确认」。
+        它当时落进了「未知状态 → FAILED」那一支，于是轮询**当场结束**——用户随后在手机上
+        点确认时，**已经没有任何人在等那个结果了**，而他收到的是「授权没走完」。
+
+        现在的规则：**只有拿到 `scanCode` 才算成功，只有明确的终态信号才结束，其余一律
+        继续等**（见 `login.interpret_scan_status`）。超时是兜底，且**分两种说法**——
+        一直没扫到、和扫到了却始终没确认，对用户是两件不同的事。
         """
         seen: set[str] = set()
+        attempts = POLL_ATTEMPTS
+        used = 0
+        told_to_confirm = False
         try:
-            for _ in range(POLL_ATTEMPTS):
+            while used < attempts:
+                used += 1
                 await asyncio.sleep(POLL_INTERVAL_SECONDS)
                 try:
                     raw = await asyncio.to_thread(self._scan_status_request, scan_id)
@@ -497,21 +519,41 @@ class SklandModule(Module):
                         f"二维码已失效（{reading.message}）。重新发一次 /ak skland login 即可。",
                     )
                     return
-                if reading.state is login.ScanState.FAILED:
-                    await self._report_failure(
-                        umo,
-                        login.step_failure(
-                            login.STEP_POLL,
-                            reading.message,
-                            raw.payload,
-                            http_status=raw.http_status,
-                        ),
-                    )
-                    return
-            await self._send(umo, "二维码超时了（约 2 分钟）。再发一次 /ak skland login。")
+                if reading.state is login.ScanState.AWAITING_CONFIRMATION:
+                    # 用户已经扫到了，只是还没点确认。**这里绝不能 return**——
+                    # 他点确认的那一刻必须还有人在等。只在他刚扫到时说一次话。
+                    if not told_to_confirm:
+                        told_to_confirm = True
+                        attempts = max(attempts, used + CONFIRMATION_GRACE_ATTEMPTS)
+                        logger.info(
+                            "[ak_toolbox][skland] 用户已扫码，等待手机确认（窗口延长 %d 秒）",
+                            CONFIRMATION_GRACE_ATTEMPTS * int(POLL_INTERVAL_SECONDS),
+                        )
+                        await self._send(
+                            umo,
+                            "已经扫到码了，请在手机上点「确认」（有效期不重要了，"
+                            "我这边继续等着）。",
+                        )
+                    continue
+                # WAITING：还没扫到、或状态不明——按设计继续等，不判死。
+            await self._send(umo, self._timeout_message(never_scanned=not told_to_confirm))
         except asyncio.CancelledError:  # pragma: no cover - 重载时取消
             logger.info("[ak_toolbox][skland] 扫码轮询被取消")
             raise
+
+    @staticmethod
+    def _timeout_message(*, never_scanned: bool) -> str:
+        """超时的两种说法。
+
+        「扫到了但没确认」和「一直没扫」对用户是两件事：前者他**以为自己已经做完了**
+        （手机上点过确认、或者忘了点），只说「超时了」他会以为是二维码坏了。
+        """
+        if never_scanned:
+            return "二维码超时了（约 2 分钟）。再发一次 /ak skland login。"
+        return (
+            "扫到了，但一直没在手机上点「确认」，授权没走完。"
+            "重新发一次 /ak skland login 再来一次（记得扫完点确认）。"
+        )
 
     def _scan_status_request(self, scan_id: str) -> api.RawCall:
         assert self._client is not None

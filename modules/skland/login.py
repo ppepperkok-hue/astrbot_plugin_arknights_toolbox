@@ -12,11 +12,35 @@ POST {hyper}/user/oauth2/v2/grant           {appCode, token, type:0} → 授权 
 POST {zonai}/user/auth/generate_cred_by_code {code, kind:1}     → cred + token
 ```
 
-⚠️ **「已扫码」的判据我刻意不写数字。** 实测只拿到「未扫码 = `status: 100`」这一个取值，
-**成功时的 status 是多少没有实测过**。所以这里按**结构**判定：响应里出现非空的
-`scanCode` 才算扫到了；其余取值一律当作「还没好」，并把原始 `status`/`msg` 原样带出来
-给用户看。编一个「status == 0 就是成功」是照文档猜，本项目在 `FormData` 那条 API 事实上
-栽过一次，不重复。
+## 「继续等」是默认，「报失败」要证据（2026-09-29 线上事故的教训）
+
+**成功判据仍然是结构**：响应里出现非空的 `scanCode` 才算扫到了。**不依赖任何数字**——
+服务端在别的 `status` 下给出 `scanCode` 也照样通过。
+
+但**其余取值的默认处理在本包被倒过来了**。原先的实现是「认识的值继续等，不认识的值
+报失败」，于是一个**没实测过的等待态**（`status: 101`「已扫码待确认」）落进了失败分支，
+**轮询当场中止**——用户在手机上点确认时，已经没有任何人在等那个结果了，他看到的却是
+「授权没走完」。**实测现场**：
+
+```
+第 2 步（轮询扫码状态） 失败：已扫码待确认
+｜服务端：HTTP 200；status=101；type='A'；msg='已扫码待确认'；没有 data 字段
+```
+
+所以现在的规则是：
+
+- **只有拿到 `scanCode` 才成功**（结构判据，不放宽）；
+- **只有拿到「明确的终态信号」才算失败**（二维码失效：实测/参考实现的状态值，或
+  服务端消息里明说失效/过期）；
+- **其余一律继续等**，由**超时**兜底。不认识的 `status` 不再判死——**它顶多多等一会儿，
+  而误判会直接把一次合法的授权掐死**。两者的代价不对称。
+
+> 这条账要记清楚：**线上的 `101` 来自实测，而 `0` / `102` 来自参考实现**。
+> 参考实现的状态码**与本服务器的实际情况不一致**——把参考实现当事实是这次的根因之一。
+
+**超时兜底也是分两种说法的**（见 `modules/skland/module.py` 的 `_poll_scan`）：一直没扫到，
+说「二维码超时了，重发一次」；**已经扫到但用户始终没在手机上确认**，说「扫到了但没确认」
+——后者才是他真正需要知道的事。
 
 ⚠️ 通行证侧（`as.hypergryph.com`）用 `status` 字段而不是 `code`，两个侧的判据不同——
 本文件按各自的响应形态处理。
@@ -87,15 +111,40 @@ CRED_KIND_SKLAND: Final[int] = 1
 #: `scan_status` 实测「未扫码」的取值。**只用于显示，不作为成功判据。**
 _STATUS_NOT_SCANNED: Final[int] = 100
 
+#: `scan_status` 实测「已扫码、正在等手机确认」的取值。
+#:
+#: **这是 2026-09-29 线上事故的直接证据**（用户扫码后服务端返回
+#: `status=101；msg='已扫码待确认'`）。它是**正常中间态**：用户已经扫到了码，
+#: 只是还没在自己手机上点「确认」。**必须继续等，绝不能中止轮询**。
+_STATUS_AWAITING_CONFIRMATION: Final[int] = 101
+
+# --- 为什么参考实现的 `0` 在代码里没有分支（别再加回来）-----------------------
+#
+# 参考实现（MIT）把「`status == 0` 且没有 `scanCode`」当作「已扫、待确认」。**我们不采信**：
+#
+# 1. `0` 在本协议里是**通用成功码**——第 1 步 `gen_scan/login` 的成功响应就是
+#    `{"status": 0, "data": {...}}`。所以「`0` 且没有码」最老实的解读是
+#    **「请求成功、但还没有码」= 继续等**，而不是「已扫待确认」。
+# 2. 更要紧的是：**参考实现的状态码不等于本服务器的事实**。这次事故的根因之一就是
+#    照参考实现认 `0`，而真实服务端用的是 **`101`**（实测），于是**真实发生的等待态
+#    无人认领、被判成了失败**。
+#
+# 它现在落在默认分支里（继续等），措辞用中性说法——行为上完全够用，
+# 而**给它编一个"已扫待确认"的含义只是往同一个坑里再走一步**。
+
 #: `scan_status` 的「二维码已失效」取值。
 #: `UNVERIFIED`：来自参考实现（`morizero_main.py:525` 判 `status == 102` 为
-#: 「二维码已失效（超时未确认）」），**我们没有独立实测**。它只影响**提示措辞**
-#: （比「没有拿到凭据」有用），不参与成功判据——成功仍然只看有没有 `scanCode`。
+#: 「二维码已失效（超时未确认）」），**我们没有独立实测**。它是**终态**，但即使这个
+#: 数字将来不对，代价也只是「少一种提前告知」——消息里的失效措辞是另一条独立线索，
+#: 而超时兜底最终会接住它。**它不参与成功判据。**
 _STATUS_QR_EXPIRED: Final[int] = 102
 
-#: `scan_status` 的「已扫码但还没在手机上确认」。同样来自参考实现
-#: （它在 `status == 0` 但拿不到 `scanCode` 时继续等）。**这是正常中间态，不是失败。**
-_STATUS_SCANNED_PENDING: Final[int] = 0
+#: 服务端消息里表示「终态」的措辞线索。
+#:
+#: 为什么除了数字还要看消息：状态值域我们**没有权威表**（官方无公开文档），而消息是
+#: 服务端自己写的。放在这里比编一个数字安全：**命中它只是"提前告诉用户该重来"**，
+#: 不命中就继续等，两条路都不会把一次合法授权掐死。
+_EXPIRY_MESSAGE_MARKERS: Final[tuple[str, ...]] = ("过期", "失效", "expired")
 
 
 @dataclass(frozen=True)
@@ -330,6 +379,22 @@ def _text_field(payload: Any) -> str:
     return ""
 
 
+def _expiry_signal(status_number: int | None, message: str) -> bool:
+    """响应里有没有**明确的终态信号**（二维码失效）。
+
+    两条互相独立的线索：**参考实现的状态值**（`102`，未在本环境实测）与**服务端自己
+    写的措辞**。任一条命中就判失效——失效是**终态**，提前说「重发一次」比让用户干等
+    两分钟有用。
+
+    ⚠️ 反过来**不成立**：没命中**不等于**「还有效」，只等于「我们不知道」，所以调用方
+    必须继续等。这个方向的不对称是刻意的——见 :func:`interpret_scan_status`。
+    """
+    if status_number == _STATUS_QR_EXPIRED:
+        return True
+    lowered = message.lower()
+    return any(marker in message or marker in lowered for marker in _EXPIRY_MESSAGE_MARKERS)
+
+
 def suggest_action(
     *,
     step: Step | None = None,
@@ -343,13 +408,7 @@ def suggest_action(
     """
     status = _int_field(payload, "status")
     message = _text_field(payload)
-    lowered = message.lower()
-    if (
-        status == _STATUS_QR_EXPIRED
-        or "过期" in message
-        or "失效" in message
-        or "expired" in lowered
-    ):
+    if _expiry_signal(status, message):
         return (
             "二维码已过期、或这次扫码的服务端登录态已作废——重新发一次 /ak skland login，再扫一次。"
         )
@@ -362,23 +421,35 @@ def suggest_action(
 
 
 class ScanState(StrEnum):
-    """轮询状态的四种结局。"""
+    """轮询状态的四种结局。
 
-    WAITING = "waiting"
-    """用户还没扫（或已经扫了但还没在手机上点确认）。"""
+    **`FAILED` 被删掉了，这是有意的。** 原先它接住「既没有 `scanCode`、状态又不是已知
+    取值」的响应，于是**一个没实测过的等待态（`101`）被它判死、轮询中止**，用户在手机上
+    点确认时已经没人在等。现在没有**实测证据**支持任何「轮询终态失败」的 `status` 取值，
+    所以这一类响应一律归入 :attr:`WAITING`（继续等），由**超时**兜底。
 
-    SCANNED = "scanned"
-    """拿到了 `scanCode`，可以进入换 token 那一步。"""
-
-    EXPIRED = "expired"
-    """二维码失效了（`status == 102`）——**这不是错误，是"该重来一次"**。
-
-    `UNVERIFIED`：判据来自参考实现，非实测。它只影响**措辞**（说"过期了，重扫"
-    比说"失败了"有用），所以即使这个数字将来不对，代价也只是措辞不够准。
+    代价不对称：多等一会儿只是慢，误判会**掐死一次合法授权**。
     """
 
-    FAILED = "failed"
-    """服务端明确说了失败（既没有 `scanCode`，状态又不是已知的正常中间态）。"""
+    WAITING = "waiting"
+    """还没扫到，或状态不明——**继续等**（超时兜底）。"""
+
+    AWAITING_CONFIRMATION = "awaiting_confirmation"
+    """**已经扫到了，正在等用户在手机上点确认**（实测 `status=101`）。
+
+    与 :attr:`WAITING` 分开是因为**该对用户说的话不同**：这时候他要做的是「看手机、
+    点确认」，而不是「再扫一次」。上一次线上失败就是在这个状态下说了「失败」。
+    """
+
+    SCANNED = "scanned"
+    """拿到了 `scanCode`，可以进入换 token 那一步。**唯一的成功判据。**"""
+
+    EXPIRED = "expired"
+    """二维码失效了——**这不是错误，是"该重来一次"**（终态）。
+
+    `UNVERIFIED`：状态值来自参考实现，非实测；消息措辞是第二条独立线索。
+    它只影响**措辞**（说"过期了，重扫"比说"失败了"有用），不参与成功判据。
+    """
 
 
 @dataclass(frozen=True)
@@ -428,12 +499,17 @@ def interpret_scan_status(payload: Any) -> ScanStatusReading:
 
     **成功判据是「出现了非空的 `scanCode`」**，不是某个数字——见模块 docstring。
 
-    两种正常中间态**不算失败**（此前会误报为「扫码失败」，是个会让用户以为
-    二维码坏了而放弃的假故障）：
+    判定顺序（**从最有证据的往下排**）：
 
-    - `status == 100`：还没扫（实测值）。
-    - `status == 0` 但还没有 `scanCode`：**已经扫了、还在手机上等确认**
-      （来自参考实现；我们此前把它判成 FAILED）。
+    1. **有 `scanCode` → :attr:`ScanState.SCANNED`**。结构判据，与 `status` 取值无关。
+    2. **`status == 101` → :attr:`ScanState.AWAITING_CONFIRMATION`**。**实测值**：
+       用户已扫到、正在自己手机上确认。**必须继续等**——上一次线上失败就是这里中止的。
+    3. **明确的失效信号（状态值或消息措辞）→ :attr:`ScanState.EXPIRED`**。终态。
+    4. **其余一切 → :attr:`ScanState.WAITING`**，继续等，由超时兜底。
+
+    **第 4 条是默认分支，这是本包的核心改动。** 原先它是「未知状态 → FAILED」，
+    而那正是把一次合法授权掐死的形状。现在**没有证据就不判死**：不认识的 `status`
+    顶多多等一会儿，代价远小于误判。
     """
     if not isinstance(payload, Mapping):
         raise step_failure(STEP_POLL, f"轮询响应不是对象（{type(payload).__name__}）", payload)
@@ -455,10 +531,23 @@ def interpret_scan_status(payload: Any) -> ScanStatusReading:
     if not scan_code:
         scan_code = _non_empty_str(payload.get("scanCode"))
 
+    # ① 结构判据：拿到 scanCode 就是成功了，不关心 status 是多少。
     if scan_code:
         return ScanStatusReading(ScanState.SCANNED, "已扫码", scan_code, status_number)
 
-    if status_number == _STATUS_QR_EXPIRED:
+    # ② 实测的「已扫、等确认」优先于失效措辞：这个数字是我们亲眼见到的，
+    #    而措辞靠猜——两者冲突时信实测。
+    if status_number == _STATUS_AWAITING_CONFIRMATION:
+        return ScanStatusReading(
+            ScanState.AWAITING_CONFIRMATION,
+            message or "已扫码，等待手机确认",
+            "",
+            status_number,
+        )
+
+    # ③ 终态：失效。状态值（参考实现）或消息措辞，任一命中即可——失效是要"重来"的，
+    #    提前告知比让用户干等两分钟有用。
+    if _expiry_signal(status_number, message):
         return ScanStatusReading(
             ScanState.EXPIRED,
             message or "二维码已失效（超时未确认）",
@@ -466,19 +555,12 @@ def interpret_scan_status(payload: Any) -> ScanStatusReading:
             status_number,
         )
 
-    if status_number in (None, _STATUS_NOT_SCANNED, _STATUS_SCANNED_PENDING):
-        # 未扫码、或「扫了但还没确认」都是**正常中间态**，不是失败。
-        detail = "已扫码，等待手机确认" if status_number == _STATUS_SCANNED_PENDING else "还没扫码"
-        return ScanStatusReading(ScanState.WAITING, message or detail, "", status_number)
-
-    # 既没有 scanCode、状态又不是已知的正常中间态——如实报失败并把原文带出来，
-    # 不猜它是什么意思。
-    return ScanStatusReading(
-        ScanState.FAILED,
-        message or f"扫码状态异常（status={status_number}）",
-        "",
-        status_number,
-    )
+    # ④ 默认：继续等。**不认识的 status 也走这里**——没有证据就不判死。
+    #    ⚠️ 参考实现把 `status == 0` 当「已扫待确认」，但 `0` 在本协议里是**通用成功码**
+    #    （第 1 步的成功响应就是它），所以这里**不给它特殊含义**：它和其余未知值一样
+    #    只是"继续等"，措辞用中性说法。**不认识的等待态多等一会儿，代价远小于误判。**
+    detail = "还没扫码" if status_number == _STATUS_NOT_SCANNED else "扫码状态暂未变化"
+    return ScanStatusReading(ScanState.WAITING, message or detail, "", status_number)
 
 
 def parse_token_by_scan_code(payload: Any) -> str:
