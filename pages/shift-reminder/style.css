@@ -1,34 +1,128 @@
-/* 基建换班提醒 —— 状态 + 班次时间轴。
-   样式克制、跟随系统深浅色；刻意不引任何外部 CDN（离线环境也能用）。 */
+/* 基建换班提醒 —— 面板样式。
+ *
+ * 两条贯穿全文件的原则（见 docs/architecture/webui-design.md）：
+ *
+ * 1. **颜色只能通过语义 token 使用**。组件里不写死色值，深浅色只换 token。
+ *    唯一例外是压在饱和底色上的文字（白字压在班次色上），因为那是"跟底色走"
+ *    的对比色，不该受主题影响——每处都有注释说明。
+ * 2. **留白是信息**。间距与圆角走 token，不一处一个魔数；宁可让用户滚动，
+ *    也不把一屏塞满。
+ *
+ * 零外部资源：不引 CDN、字体、图片（干员头像是唯一的外链图片，且必须能
+ * 在断网时退回本地首字色块）。
+ */
+
+/* ==========================================================================
+   1. 设计 token
+   ========================================================================== */
 
 :root {
   color-scheme: light dark;
+
+  /* --- 语义色 --- */
   --fg: #1f2328;
+  --fg-strong: #14171a;
   --muted: #6b7280;
   --bg: #f6f7f9;
   --card: #ffffff;
   --line: #e3e6ea;
+  --line-soft: #eef0f3;
+  --accent: #3b82f6;
+
+  /* 状态色：概览卡的左侧色条与文字用它，表达"要不要留意"。 */
+  --ok: #1a7f37;
+  --warn: #9a6700;
   --bad: #b42318;
+  --info: #0b6bcb;
+
+  /* 状态色的浅底（卡片背景），仍由主题控制。 */
+  --ok-bg: rgb(26 127 55 / 8%);
+  --warn-bg: rgb(154 103 0 / 8%);
+  --bad-bg: rgb(180 35 24 / 8%);
+  --info-bg: rgb(11 107 203 / 7%);
+
+  /* --- 班次色（时间轴、徽标、编辑行共用一套） --- */
   --shift-1: #3b82f6;
   --shift-2: #f59e0b;
   --shift-3: #8b5cf6;
   --handle: #ffffff;
+
+  /* --- 房型色 -----------------------------------------------------------
+   * 服务端能发出的 key 是 roster.ROOM_LABELS 的键（scripts/check_room_colours.py
+   * 会在 CI 里核对，缺一个就报错）。颜色只做一件事：让用户扫一眼就知道
+   * 哪块是哪种房型，不必读字。
+   * -------------------------------------------------------------------- */
+  --room-trading: #0ca678;
+  --room-manufacture: #d9930d;
+  --room-power: #37b24d;
+  --room-dormitory: #7048e8;
+  --room-control: #3b5bdb;
+  --room-meeting: #1098ad;
+  --room-hire: #5c7cfa;
+  --room-processing: #e8590c;
+  /* 兜底：没写进上面这张表、或服务端将来新增的房型，仍要有个颜色。 */
+  --room-color: var(--muted);
+
+  /* --- 间距（留白是信息，不是浪费） --- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+
+  /* --- 圆角 --- */
+  --r-sm: 6px;
+  --r-md: 9px;
+  --r-lg: 14px;
+  --r-pill: 999px;
+
+  /* --- 尺寸 --- */
+  --avatar: 44px;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     --fg: #e6e8eb;
+    --fg-strong: #f6f7f9;
     --muted: #9aa1ab;
     --bg: #16181c;
     --card: #1f2227;
     --line: #2c3037;
+    --line-soft: #24272d;
+    --accent: #4c8dff;
+
+    --ok: #4ec97a;
+    --warn: #e3b341;
     --bad: #ff8a80;
+    --info: #6aa9ff;
+
+    --ok-bg: rgb(78 201 122 / 10%);
+    --warn-bg: rgb(227 179 65 / 10%);
+    --bad-bg: rgb(255 138 128 / 10%);
+    --info-bg: rgb(106 169 255 / 10%);
+
+    /* 深色下把班次色压暗一档：纯饱和色压在深底上会刺眼。 */
     --shift-1: #2563eb;
     --shift-2: #b45309;
     --shift-3: #6d28d9;
     --handle: #f8fafc;
+
+    /* 房型色同样压暗，保持"颜色能认出房型"但不过曝。 */
+    --room-trading: #0b8f68;
+    --room-manufacture: #b87d0b;
+    --room-power: #2f9c42;
+    --room-dormitory: #5f3ecf;
+    --room-control: #3350c4;
+    --room-meeting: #0e8394;
+    --room-hire: #4a68d6;
+    --room-processing: #b8480a;
   }
 }
+
+/* ==========================================================================
+   2. 基础
+   ========================================================================== */
 
 * {
   box-sizing: border-box;
@@ -36,48 +130,51 @@
 
 body {
   margin: 0;
-  padding: 20px;
+  padding: var(--sp-5) var(--sp-4) var(--sp-6);
   background: var(--bg);
   color: var(--fg);
   font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
   font-size: 14px;
-  line-height: 1.5;
-}
-
-.wrap {
-  max-width: 760px;
-  margin: 0 auto;
-  display: grid;
-  gap: 16px;
-}
-
-.head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  line-height: 1.55;
 }
 
 h1 {
   font-size: 20px;
   margin: 0;
+  color: var(--fg-strong);
 }
 
 h2 {
   font-size: 13px;
-  margin: 0 0 8px;
+  margin: 0 0 var(--sp-3);
   color: var(--muted);
   font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+h3 {
+  font-size: 15px;
+  margin: 0;
+  color: var(--fg-strong);
 }
 
 button {
   font: inherit;
-  padding: 6px 14px;
-  border-radius: 8px;
+  padding: 7px 14px;
+  border-radius: var(--r-sm);
   border: 1px solid var(--line);
   background: var(--card);
   color: var(--fg);
   cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--muted);
+}
+
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 button:disabled {
@@ -86,31 +183,180 @@ button:disabled {
 }
 
 button.ghost {
-  padding: 4px 10px;
+  padding: 5px 10px;
   color: var(--muted);
+  background: transparent;
+}
+
+button.ghost:hover:not(:disabled) {
+  color: var(--fg);
 }
 
 button.small {
-  padding: 2px 8px;
+  padding: 3px 9px;
   font-size: 12px;
 }
 
-.cards {
-  display: grid;
-  gap: 16px;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+input[type="text"],
+input[type="number"] {
+  font: inherit;
+  padding: 6px 9px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--fg);
+  min-width: 0;
 }
+
+input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+code {
+  background: var(--line-soft);
+  padding: 1px 5px;
+  border-radius: var(--r-sm);
+}
+
+/* ==========================================================================
+   3. 布局骨架：概览 → 内容 → 设置 → 次要
+   ========================================================================== */
+
+.wrap {
+  max-width: 980px;
+  margin: 0 auto;
+  display: grid;
+  gap: var(--sp-4);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+/* ==========================================================================
+   4. 概览层
+   参考站的第一屏是"现在什么状况"，不是内容本身。这一层就是这个作用：
+   左侧色条只回答一件事——这个状态要不要留意。
+   ========================================================================== */
+
+.overview {
+  display: grid;
+  gap: var(--sp-3);
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+}
+
+.ov-card {
+  position: relative;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: var(--sp-4);
+  padding-left: calc(var(--sp-4) + 4px);
+  overflow: hidden;
+}
+
+/* 状态色条：默认中性，tone 类只改这一条的颜色。 */
+.ov-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  background: var(--line);
+}
+
+.ov-card.is-info::before {
+  background: var(--info);
+}
+
+.ov-card.is-good::before {
+  background: var(--ok);
+}
+
+.ov-card.is-warn::before {
+  background: var(--warn);
+}
+
+.ov-card.is-bad::before {
+  background: var(--bad);
+}
+
+.ov-card.is-info {
+  background: var(--info-bg);
+}
+
+.ov-card.is-good {
+  background: var(--ok-bg);
+}
+
+.ov-card.is-warn {
+  background: var(--warn-bg);
+}
+
+.ov-card.is-bad {
+  background: var(--bad-bg);
+}
+
+/* 主卡（当前班次）在宽屏上占两列：它承载倒计时，是用户最想看的信息。 */
+@media (min-width: 720px) {
+  .ov-primary {
+    grid-column: span 2;
+  }
+}
+
+.ov-label {
+  margin: 0 0 var(--sp-1);
+  font-size: 12px;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+
+.ov-value {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 600;
+  color: var(--fg-strong);
+  line-height: 1.3;
+}
+
+.ov-primary .ov-value {
+  font-size: 22px;
+}
+
+.ov-sub {
+  margin: var(--sp-1) 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ov-sub:empty {
+  display: none;
+}
+
+.countdown {
+  margin: var(--sp-2) 0 0;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+
+.countdown:empty {
+  display: none;
+}
+
+/* ==========================================================================
+   5. 卡片与次要文本
+   ========================================================================== */
 
 .card {
   background: var(--card);
   border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 16px;
-}
-
-.big {
-  font-size: 17px;
-  margin: 0 0 6px;
+  border-radius: var(--r-lg);
+  padding: var(--sp-4);
 }
 
 .muted {
@@ -119,69 +365,61 @@ button.small {
   margin: 0;
 }
 
-.countdown {
-  margin: 8px 0 0;
-  font-size: 15px;
-  font-variant-numeric: tabular-nums;
-}
-
-.kv {
-  display: grid;
-  grid-template-columns: 5.5em 1fr;
-  gap: 6px 12px;
-  margin: 0 0 10px;
-}
-
-.kv dt {
-  color: var(--muted);
-}
-
-.kv dd {
-  margin: 0;
-}
-
-.recent {
+/* 设置区默认折叠：它改动频率低，展开后仍是完整编辑器。 */
+.settings > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-2) var(--sp-3);
+  cursor: pointer;
   list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 6px;
-  font-size: 13px;
-  font-variant-numeric: tabular-nums;
 }
 
-.recent .bad {
-  color: var(--bad);
+.settings > summary::-webkit-details-marker {
+  display: none;
 }
 
-.error {
-  margin: 0;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: rgba(180, 35, 24, 0.12);
-  color: var(--bad);
-  font-size: 13px;
+.settings > summary::before {
+  content: "▸";
+  color: var(--muted);
+  font-size: 12px;
 }
 
-/* --- 排班表：上传 + 全貌 --------------------------------------------------- */
+.settings[open] > summary::before {
+  content: "▾";
+}
+
+.settings-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg-strong);
+}
+
+.settings[open] > summary {
+  margin-bottom: var(--sp-3);
+}
+
+.settings > *:not(summary) + *:not(summary) {
+  margin-top: var(--sp-3);
+}
+
+/* ==========================================================================
+   6. 上传与汇总
+   ========================================================================== */
 
 .upload-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--sp-2);
   align-items: center;
-  margin: 10px 0 6px;
+  margin: var(--sp-3) 0 var(--sp-2);
 }
 
 .upload-row input[type="file"] {
-  flex: 1 1 220px;
+  flex: 1 1 240px;
   min-width: 0;
   font-size: 13px;
   color: var(--fg);
-}
-
-.roster {
-  margin-top: 4px;
 }
 
 /* 时长建议：从排班表名字里读出的节奏，点按钮才填进时间轴。 */
@@ -189,11 +427,12 @@ button.small {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px 12px;
-  margin: 10px 0 2px;
-  padding: 10px 12px;
+  gap: var(--sp-2) var(--sp-3);
+  margin: var(--sp-3) 0 0;
+  padding: var(--sp-3);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--r-md);
+  background: var(--info-bg);
 }
 
 .suggestion[hidden] {
@@ -201,7 +440,7 @@ button.small {
 }
 
 .suggestion p {
-  flex: 1 1 260px;
+  flex: 1 1 280px;
   margin: 0;
 }
 
@@ -209,13 +448,12 @@ button.small {
   flex: 0 0 auto;
 }
 
-/* 顶部汇总：让用户一眼看出「这套布局有多大」。 */
 .roster-summary {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 10px 18px;
-  margin-top: 12px;
+  gap: var(--sp-2) var(--sp-5);
+  margin-top: var(--sp-4);
 }
 
 .roster-summary:empty {
@@ -229,10 +467,11 @@ button.small {
 }
 
 .stat-value {
-  font-size: 20px;
+  font-size: 21px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   line-height: 1.1;
+  color: var(--fg-strong);
 }
 
 .stat-unit {
@@ -244,47 +483,115 @@ button.small {
   flex: 1 1 100%;
 }
 
-/* 每个班次一块，左侧色条与时间轴的段色对应。 */
-.roster-shift {
-  margin-top: 16px;
-  padding: 12px 12px 4px;
+/* ==========================================================================
+   7. 班次切换（分段控件）
+   用户要的是「点第一班看第一班」，而不是一页摊开三班四十多间房。
+   ========================================================================== */
+
+.shift-tabs {
+  display: flex;
+  gap: var(--sp-1);
+  margin: var(--sp-3) 0 var(--sp-4);
+  padding: var(--sp-1);
   border: 1px solid var(--line);
-  border-left: 3px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--r-lg);
+  background: var(--bg);
+  /* 手机窄屏横向滚动而不是折行——折行会让三个 tab 高低不齐。 */
+  overflow-x: auto;
 }
 
+.shift-tab {
+  flex: 1 1 auto;
+  min-width: 96px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.shift-tab:hover {
+  color: var(--fg);
+}
+
+.shift-tab.is-active {
+  background: var(--card);
+  border-color: var(--line);
+  color: var(--fg);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 6%);
+}
+
+.shift-tab-label {
+  font-weight: 600;
+}
+
+.shift-tab-hint {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.shift-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ==========================================================================
+   8. 排班表
+   ========================================================================== */
+
+.roster {
+  margin-top: var(--sp-3);
+}
+
+/* 一次只显示一个班次（切换由 .shift-tabs 控制），所以这里不需要额外留白。 */
+.roster-shift {
+  padding: 0;
+}
+
+/* 班次块的色调：与时间轴、徽标同色，让"这是第几班"在整块内容上都是一致的。
+ * app.js 会输出 shift-tint-0/1/2 —— 少了这几条规则就会静默没有颜色，
+ * 所以这里的类名必须与 JS 的模板字面量严格对应。 */
 .roster-shift.shift-tint-0 {
-  border-left-color: var(--shift-1);
+  --shift-tint: var(--shift-1);
 }
 
 .roster-shift.shift-tint-1 {
-  border-left-color: var(--shift-2);
+  --shift-tint: var(--shift-2);
 }
 
 .roster-shift.shift-tint-2 {
-  border-left-color: var(--shift-3);
+  --shift-tint: var(--shift-3);
+}
+
+.roster-shift.shift-tint-0,
+.roster-shift.shift-tint-1,
+.roster-shift.shift-tint-2 {
+  border-left: 3px solid var(--shift-tint);
+  padding-left: var(--sp-3);
 }
 
 .shift-head {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.shift-head h3 {
-  margin: 0;
-  font-size: 15px;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-4);
 }
 
 .shift-badge {
-  padding: 2px 8px;
-  border-radius: 999px;
+  padding: 3px 10px;
+  border-radius: var(--r-pill);
   font-size: 12px;
   font-weight: 600;
-  /* 白字压在饱和底色上（见下方的 --shift-N）。这里是设计依据允许的例外：
-     对比色写死是有意的——底色已经是主题色，文字必须跟着它走，不该再受主题影响。 */
+  /* 白字压在饱和底色上：对比色写死是有意的例外——底色已经是主题色，
+     文字必须跟着它走，不该再受深浅主题影响。 */
   color: #ffffff;
 }
 
@@ -305,128 +612,209 @@ button.small {
   font-variant-numeric: tabular-nums;
 }
 
-/* 房型网格：窄屏自动折成一列，宽屏并排。 */
+/* 房型网格：留够空隙，窄屏折成一列。 */
 .room-grid {
   display: grid;
-  gap: 10px;
-  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: var(--sp-3);
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
 }
 
 .room-card {
+  position: relative;
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: var(--r-md);
   background: var(--bg);
-  padding: 8px 10px 10px;
+  padding: var(--sp-3);
+  padding-left: calc(var(--sp-3) + 4px);
   min-width: 0;
+}
+
+/* 房型色条：靠颜色认房型，不必读字。颜色来自上面的 --room-* token。
+   没有匹配到 data-room 时回落到 --room-color，仍然是"有颜色但中性"。 */
+.room-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  border-radius: var(--r-md) 0 0 var(--r-md);
+  background: var(--room-color);
+}
+
+.room-card[data-room="trading"]::before {
+  background: var(--room-trading);
+}
+
+.room-card[data-room="manufacture"]::before {
+  background: var(--room-manufacture);
+}
+
+.room-card[data-room="power"]::before {
+  background: var(--room-power);
+}
+
+.room-card[data-room="dormitory"]::before {
+  background: var(--room-dormitory);
+}
+
+.room-card[data-room="control"]::before {
+  background: var(--room-control);
+}
+
+.room-card[data-room="meeting"]::before {
+  background: var(--room-meeting);
+}
+
+.room-card[data-room="hire"]::before {
+  background: var(--room-hire);
+}
+
+.room-card[data-room="processing"]::before {
+  background: var(--room-processing);
 }
 
 .room-card-head {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding-bottom: 6px;
-  margin-bottom: 6px;
-  border-bottom: 1px dashed var(--line);
+  gap: var(--sp-2);
+  padding-bottom: var(--sp-2);
+  margin-bottom: var(--sp-3);
+  border-bottom: 1px solid var(--line);
 }
 
 .room-icon {
   flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
-  border-radius: 6px;
-  background: var(--card);
-  border: 1px solid var(--line);
-  color: var(--muted);
+  width: 22px;
+  height: 22px;
+  border-radius: var(--r-sm);
+  /* 图标底用该房型的色条同色，缩成一块小标识；文字压在饱和色上，
+     对比色写死同 .shift-badge 的理由。 */
+  color: #ffffff;
+  background: var(--room-color);
   font-size: 12px;
-  line-height: 18px;
+  line-height: 22px;
   text-align: center;
   font-weight: 600;
+}
+
+.room-card[data-room="trading"] .room-icon {
+  background: var(--room-trading);
+}
+
+.room-card[data-room="manufacture"] .room-icon {
+  background: var(--room-manufacture);
+}
+
+.room-card[data-room="power"] .room-icon {
+  background: var(--room-power);
+}
+
+.room-card[data-room="dormitory"] .room-icon {
+  background: var(--room-dormitory);
+}
+
+.room-card[data-room="control"] .room-icon {
+  background: var(--room-control);
+}
+
+.room-card[data-room="meeting"] .room-icon {
+  background: var(--room-meeting);
+}
+
+.room-card[data-room="hire"] .room-icon {
+  background: var(--room-hire);
+}
+
+.room-card[data-room="processing"] .room-icon {
+  background: var(--room-processing);
 }
 
 .room-label {
   font-size: 13px;
   font-weight: 600;
+  color: var(--fg-strong);
 }
 
 .room-qty {
   margin-left: auto;
-  font-size: 12px;
+  padding: 1px 8px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line);
+  font-size: 11px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
 
 .room-list {
   display: grid;
-  gap: 6px;
+  gap: var(--sp-3);
 }
 
 .room-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--sp-2) var(--sp-3);
+  align-items: start;
   min-width: 0;
 }
 
 .room-row .room-where {
-  flex: 0 0 auto;
-  min-width: 1.1em;
   color: var(--muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
-  padding-top: 1px;
+  padding-top: 2px;
+  white-space: nowrap;
 }
 
+/* 干员：头像在上、名字在下的方形网格（参考站的做法）。
+   宽度固定，所以一行的"方块数"整齐；名字超出用省略号，不换行不撑破网格。 */
 .ops {
-  flex: 1 1 auto;
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: var(--sp-2) var(--sp-2);
   min-width: 0;
 }
 
 .op {
-  display: inline-flex;
+  position: relative;
+  width: var(--avatar);
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 5px;
-  padding: 1px 7px 1px 3px;
-  border-radius: 6px;
-  background: var(--card);
-  border: 1px solid var(--line);
-  font-size: 12px;
-  line-height: 1.6;
-  white-space: nowrap;
+  gap: 3px;
+  min-width: 0;
 }
 
-/* 干员头像：外链取来的小图，统一尺寸与圆角。 */
 .op-avatar {
-  width: 18px;
-  height: 18px;
-  border-radius: 5px;
+  width: var(--avatar);
+  height: var(--avatar);
+  border-radius: var(--r-sm);
   object-fit: cover;
   flex: 0 0 auto;
-  /* 底色用页面底色——图片有透明处时不会露出突兀的色块。 */
+  border: 1px solid var(--line);
+  /* 底色用卡片底色——图片有透明处时不会露出突兀的色块。 */
   background: var(--bg);
 }
 
 /*
  * 没有头像时的回退：中文首字色块。
  *
- * 它必须**只靠本地信息**就能画出来（名字的第一个字），因为头像走外链——断网、
- * 图源挂掉、或某位干员没有映射时都要照常可读。图片取到时靠 .has-avatar 让位；
- * 取不到时脚本撤掉 <img> 并移除这个类，色块自己就露出来了。
+ * 它必须**只靠本地信息**就能画出来（名字的第一个字），因为头像走外链——
+ * 断网、图源挂掉、或某位干员没有映射时都要照常可读。图片取到时靠
+ * .has-avatar 让位；取不到时脚本撤掉 <img> 并移除这个类，色块自己露出来。
  */
 .op-initial {
-  width: 18px;
-  height: 18px;
-  border-radius: 5px;
-  display: inline-flex;
+  width: var(--avatar);
+  height: var(--avatar);
+  border-radius: var(--r-sm);
+  display: flex;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  background: var(--bg);
+  background: var(--line-soft);
   border: 1px solid var(--line);
-  color: var(--muted);
-  font-size: 11px;
+  color: var(--fg);
+  font-size: 17px;
+  font-weight: 600;
   line-height: 1;
 }
 
@@ -435,52 +823,48 @@ button.small {
 }
 
 .op-name {
-  min-width: 0;
+  max-width: 100%;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--fg);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* 「不动」的房间照实显示（给了全貌才不会被误认为读漏），但视觉上退到后面。
    刻意**不用删除线**——那看起来像数据坏了，而它其实是一条正常的排班信息。 */
 .room-row.skipped {
-  opacity: 0.55;
+  opacity: 0.6;
 }
 
-.room-row.skipped .op {
-  background: transparent;
+.room-row.skipped .op-avatar,
+.room-row.skipped .op-initial {
   border-style: dashed;
 }
 
 .room-row .tag {
-  flex: 0 0 auto;
-  padding: 1px 6px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  background: var(--card);
+  justify-self: start;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  border: 1px dashed var(--line);
   color: var(--muted);
   font-size: 11px;
   line-height: 1.6;
 }
 
-@media (max-width: 560px) {
-  .room-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
-code {
-  background: rgba(127, 127, 127, 0.16);
-  padding: 1px 5px;
-  border-radius: 4px;
-}
-
-/* ---- 时间轴 ------------------------------------------------------------- */
+/* ==========================================================================
+   9. 时间轴
+   ========================================================================== */
 
 .timeline {
   position: relative;
-  height: 84px;
-  margin: 14px 0 10px;
-  border-radius: 10px;
+  height: 88px;
+  margin: var(--sp-3) 0 var(--sp-2);
+  border-radius: var(--r-md);
   border: 1px solid var(--line);
-  background: rgba(127, 127, 127, 0.08);
+  background: var(--line-soft);
   overflow: hidden;
   touch-action: none; /* 触屏拖动时不要触发页面滚动 */
   user-select: none;
@@ -491,14 +875,14 @@ code {
   top: 0;
   bottom: 0;
   width: 1px;
-  background: rgba(127, 127, 127, 0.25);
+  background: var(--line);
   pointer-events: none;
 }
 
 .tick span {
   position: absolute;
-  top: 2px;
-  left: 3px;
+  top: 3px;
+  left: 4px;
   font-size: 10px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
@@ -506,13 +890,12 @@ code {
 
 .bar {
   position: absolute;
-  top: 16px;
-  bottom: 6px;
-  border-radius: 6px;
-  /* 时间轴上的班次色块：白字压在饱和底色上——对比色写死是有意的例外，
-     理由同 .shift-badge（底色是主题色，文字要跟着底色走）。 */
+  top: 18px;
+  bottom: var(--sp-1);
+  border-radius: var(--r-sm);
+  /* 白字压在饱和底色上——例外理由同 .shift-badge。 */
   color: #ffffff;
-  padding: 5px 8px;
+  padding: 6px 9px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -556,10 +939,10 @@ code {
 
 .handle {
   position: absolute;
-  top: 12px;
-  bottom: 2px;
-  width: 18px;
-  margin-left: -9px;
+  top: 14px;
+  bottom: 0;
+  width: 22px;
+  margin-left: -11px;
   padding: 0;
   border: none;
   background: transparent;
@@ -572,16 +955,16 @@ code {
 
 .handle::after {
   content: "";
-  width: 14px;
-  height: 14px;
+  width: 15px;
+  height: 15px;
   border-radius: 50%;
   background: var(--handle);
-  border: 2px solid rgba(0, 0, 0, 0.35);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  border: 2px solid rgb(0 0 0 / 35%);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 30%);
 }
 
 .handle:focus-visible::after {
-  outline: 2px solid var(--shift-1);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
@@ -589,19 +972,21 @@ code {
   font-variant-numeric: tabular-nums;
 }
 
-/* ---- 编辑行 ------------------------------------------------------------- */
+/* ==========================================================================
+   10. 编辑行
+   ========================================================================== */
 
 .editors {
   display: grid;
-  gap: 8px;
-  margin-top: 12px;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
 }
 
 .editor {
   display: grid;
   grid-template-columns: 12px minmax(90px, 1fr) auto auto auto auto;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-2);
 }
 
 .editor .mono {
@@ -629,22 +1014,11 @@ code {
   background: var(--shift-3);
 }
 
-input[type="text"],
-input[type="number"] {
-  font: inherit;
-  padding: 5px 8px;
-  border-radius: 7px;
-  border: 1px solid var(--line);
-  background: var(--bg);
-  color: var(--fg);
-  min-width: 0;
-}
-
 .lead-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-top: 12px;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
 }
 
 .lead-row input {
@@ -654,78 +1028,75 @@ input[type="number"] {
 .actions {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-top: 14px;
+  gap: var(--sp-3);
+  margin-top: var(--sp-4);
   flex-wrap: wrap;
 }
 
+/* ==========================================================================
+   11. 最近发送与错误
+   ========================================================================== */
+
+.recent {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--sp-2);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.recent .bad {
+  color: var(--bad);
+}
+
+.error {
+  margin: 0;
+  padding: var(--sp-3);
+  border-radius: var(--r-md);
+  background: var(--bad-bg);
+  border: 1px solid var(--bad);
+  color: var(--bad);
+  font-size: 13px;
+}
+
+.error[hidden] {
+  display: none;
+}
+
+/* ==========================================================================
+   12. 窄屏
+   ========================================================================== */
+
 @media (max-width: 560px) {
+  body {
+    padding: var(--sp-3);
+  }
+
+  .room-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .room-row {
+    grid-template-columns: 1fr;
+  }
+
+  .room-row .room-where {
+    padding-top: 0;
+  }
+
   .editor {
     grid-template-columns: 12px 1fr auto;
-    row-gap: 4px;
+    row-gap: var(--sp-1);
   }
 
   .timeline {
-    height: 96px;
+    height: 100px;
   }
-}
 
-/* --- 班次切换（分段控件）-----------------------------------------------------
-   用户要的是「点第一班看第一班、点第二班看第二班」，而不是一页摊开三班
-   40 多间房。所以班次做成三个视图，一次只渲染一个。
-
-   颜色全部走既有语义 token（--card / --line / --muted / --fg / --shift-1），
-   不写死色值——这样深浅色主题自动跟随，组件样式不用各写一遍。 */
-.shift-tabs {
-  display: flex;
-  gap: 6px;
-  margin: 4px 0 12px;
-  padding: 4px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--bg);
-  /* 手机窄屏时横向滚动而不是折行——折行会让三个 tab 高低不齐。 */
-  overflow-x: auto;
-}
-
-.shift-tab {
-  flex: 1 1 auto;
-  min-width: 92px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  padding: 8px 10px;
-  border: 1px solid transparent;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--muted);
-  font: inherit;
-  cursor: pointer;
-}
-
-.shift-tab:hover {
-  color: var(--fg);
-}
-
-.shift-tab.is-active {
-  background: var(--card);
-  border-color: var(--line);
-  color: var(--fg);
-  box-shadow: 0 1px 2px rgb(0 0 0 / 6%);
-}
-
-.shift-tab-label {
-  font-weight: 600;
-}
-
-.shift-tab-hint {
-  font-size: 12px;
-  color: var(--muted);
-}
-
-/* 键盘可达：Tab 聚焦要有可见反馈。 */
-.shift-tab:focus-visible {
-  outline: 2px solid var(--shift-1);
-  outline-offset: 1px;
+  .shift-count {
+    margin-left: 0;
+    flex: 1 1 100%;
+  }
 }

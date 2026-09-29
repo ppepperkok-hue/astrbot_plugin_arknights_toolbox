@@ -13,68 +13,41 @@
         <button id="refresh" type="button">刷新</button>
       </header>
 
-      <p id="status-line" class="muted">正在读取…</p>
-
-      <section class="cards">
-        <article class="card">
-          <h2>当前班次</h2>
-          <p id="current" class="big">—</p>
+      <!--
+        ① 概览：页面第一眼看到的东西。
+        参考站的做法是「先回答现在什么状况，再给内容」；我们此前一进来就把
+        房间全倒出来，没有这层铺垫（见 docs/architecture/webui-design.md §1.4）。
+        左侧色条只表达一件事：这个状态要不要留意。
+      -->
+      <section class="overview" aria-label="概览">
+        <article class="ov-card ov-primary is-info" id="ov-current-card">
+          <p class="ov-label">当前班次</p>
+          <p class="ov-value" id="current">—</p>
+          <p class="ov-sub" id="upcoming">—</p>
+          <p class="ov-sub" id="upcoming-change"></p>
+          <p class="countdown" id="countdown">—</p>
         </article>
-        <article class="card">
-          <h2>下一班</h2>
-          <p id="upcoming" class="big">—</p>
-          <p id="upcoming-change" class="muted"></p>
-          <p id="countdown" class="countdown">—</p>
+
+        <article class="ov-card" id="ov-roster-card">
+          <p class="ov-label">排班表</p>
+          <p class="ov-value" id="roster">—</p>
+          <p class="ov-sub">决定提醒里是否列出「这一班该上谁」</p>
+        </article>
+
+        <article class="ov-card" id="ov-binding-card">
+          <p class="ov-label">提醒目标</p>
+          <p class="ov-value" id="binding">—</p>
+          <p class="ov-sub" id="lead">—</p>
+        </article>
+
+        <article class="ov-card" id="ov-push-card">
+          <p class="ov-label">推送状态</p>
+          <p class="ov-value" id="breaker">—</p>
+          <p class="ov-sub" id="status-line">正在读取…</p>
         </article>
       </section>
 
-      <section class="card">
-        <h2>班次时间轴</h2>
-        <p class="muted">
-          拖动<b>白色圆点</b>调整换班时刻；拖动<b>色块本身</b>可以整体平移（等于改第一班几点开始）。
-          三段永远首尾相接、合计 24 小时，所以拖不出非法配置。
-        </p>
-
-        <div
-          id="timeline"
-          class="timeline"
-          role="group"
-          aria-label="24 小时班次时间轴"
-        ></div>
-
-        <p id="timeline-hint" class="muted timeline-hint"></p>
-
-        <div id="editors" class="editors"></div>
-
-        <div class="lead-row">
-          <label for="lead-input">提前量</label>
-          <input id="lead-input" type="number" min="0" max="180" step="1" inputmode="numeric" />
-          <span class="muted">分钟</span>
-        </div>
-        <p id="lead-hint" class="muted"></p>
-
-        <div class="actions">
-          <button id="save-shifts" type="button">保存并生效</button>
-          <button id="reset-shifts" type="button" class="ghost">撤销改动</button>
-          <span id="save-hint" class="muted"></span>
-        </div>
-      </section>
-
-      <section class="card">
-        <h2>绑定与推送</h2>
-        <dl class="kv">
-          <dt>提醒目标</dt>
-          <dd id="binding">—</dd>
-          <dt>提前量</dt>
-          <dd id="lead">—</dd>
-          <dt>推送状态</dt>
-          <dd id="breaker">—</dd>
-          <dt>排班表</dt>
-          <dd id="roster">—</dd>
-        </dl>
-        <p class="muted">切换提醒目标请在 QQ 里发 <code>/ak bind</code>。</p>
-      </section>
-
+      <!-- ② 内容：排班表。用户最常看的就是「这一班该上谁」，所以它排在设置之前。 -->
       <section class="card">
         <h2>排班表</h2>
         <p class="muted">
@@ -103,6 +76,44 @@
         <div id="roster-detail" class="roster"></div>
       </section>
 
+      <!-- ③ 设置：班次时刻。默认折叠——它改动频率低，展开后仍是完整编辑器。 -->
+      <details class="card settings" id="settings">
+        <summary>
+          <span class="settings-title">班次时刻与提前量</span>
+          <span class="muted">改完记得保存</span>
+        </summary>
+
+        <p class="muted">
+          拖动<b>白色圆点</b>调整换班时刻；拖动<b>色块本身</b>可以整体平移（等于改第一班几点开始）。
+          三段永远首尾相接、合计 24 小时，所以拖不出非法配置。
+        </p>
+
+        <div
+          id="timeline"
+          class="timeline"
+          role="group"
+          aria-label="24 小时班次时间轴"
+        ></div>
+
+        <p id="timeline-hint" class="muted timeline-hint"></p>
+
+        <div id="editors" class="editors"></div>
+
+        <div class="lead-row">
+          <label for="lead-input">提前量</label>
+          <input id="lead-input" type="number" min="0" max="180" step="1" inputmode="numeric" />
+          <span class="muted">分钟</span>
+        </div>
+        <p id="lead-hint" class="muted"></p>
+
+        <div class="actions">
+          <button id="save-shifts" type="button">保存并生效</button>
+          <button id="reset-shifts" type="button" class="ghost">撤销改动</button>
+          <span id="save-hint" class="muted"></span>
+        </div>
+      </details>
+
+      <!-- ④ 最近发送：用户偶尔才看，放最后。 -->
       <section class="card">
         <h2>最近发送</h2>
         <ul id="recent" class="recent">

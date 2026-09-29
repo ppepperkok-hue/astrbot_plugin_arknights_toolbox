@@ -31,3 +31,14 @@ jobs:
 
       - name: Pytest
         run: python -m pytest -q
+
+      # Frontend has pure functions that pytest cannot reach. Node is preinstalled
+      # on the runner; the tests use only the built-in assert module (no deps).
+      - name: Node tests (frontend pure functions)
+        run: node tests/js/overview-tones.mjs
+
+      # Guards a class of bug that bit us four times in one night: a selector or
+      # key that silently matches nothing (no error, just no effect).
+      #   - CSS var typo (--border when the token is --line)
+      - name: Cross-check room colour keys against server room order
+        run: python scripts/check_room_colours.py

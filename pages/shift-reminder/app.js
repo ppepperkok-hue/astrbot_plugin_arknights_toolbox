@@ -621,6 +621,43 @@ function renderRecent(list) {
   });
 }
 
+/**
+ * 概览卡的色调：哪张卡需要用户留意。
+ *
+ * 设计依据 §2 第 4 条——「状态要能一眼看懂，不能只靠一行小字」。所以这里
+ * 把「读得懂的状态」翻译成「看得见的颜色」：正常=good、需要留意=warn、
+ * 有问题=bad、纯信息=info。**颜色只表达这一件事**，不做装饰。
+ *
+ * 抽成纯函数是为了可测：色调判断错了，用户会被引向错误的地方。
+ *
+ * @param {{rosterImported: boolean, bound: boolean, breakerOpen: boolean}} state
+ * @returns {{current: string, roster: string, binding: string, push: string}}
+ */
+export function overviewTones(state) {
+  const rosterImported = Boolean(state && state.rosterImported);
+  const bound = Boolean(state && state.bound);
+  const breakerOpen = Boolean(state && state.breakerOpen);
+  return {
+    // 当前班次是纯信息，永远中立。
+    current: "is-info",
+    // 未导入排班表**不是错误**——插件不导入也能用，所以只算「可选未做」。
+    roster: rosterImported ? "is-good" : "is-info",
+    // 未绑定则提醒根本发不出去，这是真的需要处理。
+    binding: bound ? "is-good" : "is-warn",
+    push: breakerOpen ? "is-bad" : "is-good",
+  };
+}
+
+/** 给一张概览卡换色调：先清掉旧的所有色调类，再挂新的。 */
+function applyTone(cardId, tone) {
+  const card = byId(cardId);
+  if (!card) {
+    return;
+  }
+  card.classList.remove("is-good", "is-warn", "is-bad", "is-info");
+  card.classList.add(tone);
+}
+
 function render(payload) {
   const data = normalize(payload);
   if (!data) {
@@ -667,7 +704,18 @@ function render(payload) {
   );
 
   const roster = data.roster || {};
-  setText("roster", roster.imported ? "已导入" : "未导入（提醒里暂不含干员名单）");
+  setText("roster", roster.imported ? "已导入" : "未导入");
+
+  // 概览卡上色：把「读得懂的状态」翻成「看得见的颜色」（设计依据 §2 第 4 条）。
+  const tones = overviewTones({
+    rosterImported: Boolean(roster.imported),
+    bound: Boolean(binding.bound),
+    breakerOpen: Boolean(breaker.open),
+  });
+  applyTone("ov-current-card", tones.current);
+  applyTone("ov-roster-card", tones.roster);
+  applyTone("ov-binding-card", tones.binding);
+  applyTone("ov-push-card", tones.push);
 
   renderRecent(data.recent);
 
@@ -1002,6 +1050,10 @@ function renderRoster(view) {
     (shift.groups || []).forEach((group) => {
       const card = document.createElement("div");
       card.className = "room-card";
+      // 房型 key 供 CSS 上色（`.room-card[data-room="trading"]` → `--room-trading`）。
+      // 少了这一行，房型色会**静默失效**：不报错、只是没颜色——
+      // 正是「看着没问题其实没生效」那一类，所以这里显式写出来。
+      card.dataset.room = String(group.room || "");
 
       const cardHead = document.createElement("div");
       cardHead.className = "room-card-head";
