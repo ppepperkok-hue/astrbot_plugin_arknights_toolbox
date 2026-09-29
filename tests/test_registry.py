@@ -76,6 +76,38 @@ class BoomModule(FakeModule):
         raise RuntimeError("boom")
 
 
+class DegradedModule(FakeModule):
+    """``initialize`` 成功、但自报干不了活的假模块（例如数据文件缺失）。
+
+    它**不是**失败：模块活着、资源已分配、指令也答得上，只是关键能力没有。
+    这正是 2026-09-29 线上缺陷里 `recruit` 的真实处境。
+    """
+
+    def __init__(self, name: str, trace: Trace, reason: str = "数据文件不见了") -> None:
+        super().__init__(name, trace)
+        self._reason = reason
+
+    @property
+    def unavailable_reason(self) -> str | None:
+        return self._reason
+
+
+class BlankReasonModule(FakeModule):
+    """自报不可用、但原因写成空白——不许因此被当成可用。"""
+
+    @property
+    def unavailable_reason(self) -> str | None:
+        return "   "
+
+
+class RaisingStatusModule(FakeModule):
+    """读状态本身抛异常——按不可用处理，不许掀翻宿主。"""
+
+    @property
+    def unavailable_reason(self) -> str | None:
+        raise RuntimeError("状态读不出来")
+
+
 @pytest.fixture(autouse=True)
 def _isolate_registry():
     """隔离全局注册表：用例结束后撤销它新登记的一切。"""
@@ -247,6 +279,146 @@ def test_stop_after_failed_start_only_terminates_started_modules():
     ]
 
 
+# --- 已装载但不可用：宿主必须知道（2026-09-29 线上缺陷，plan.md 待办 8） --------
+#
+# 缺陷原样：`recruit` 的 `initialize` 把数据装载失败吞在内部，于是宿主那层「逐模块
+# 隔离」根本没被触发、也无从知晓，汇总日志仍然打「已装载模块：shift_reminder、recruit」。
+# 用户据此判断「哪个功能能用」会被误导——宪法 §2 第 2 条点名的「看起来成功但什么都
+# 没发生」。
+#
+# 修法：模块可以自报不可用（`Module.unavailable_reason`），宿主把「已装载」与
+# 「能用」分成两件事。**注意它与「启动失败」是两种状态**，处置也不同：失败的是
+# 压根没起来，降级的是活着但干不了活（还能告诉用户怎么修）。
+
+
+def test_a_module_reporting_itself_unusable_is_recorded_with_a_reason():
+    register_module("degraded", lambda: DegradedModule("degraded", [], "数据文件不见了"))
+    registry = build_registry({"degraded": True})
+
+    run(registry.start_all(ctx=object(), config={}))
+
+    assert registry.degraded_modules == (("degraded", "数据文件不见了"),)
+
+
+def test_a_degraded_module_is_not_listed_as_available():
+    """这就是那个缺陷本身：日志说「已装载」，而它干不了活。"""
+    register_module("calm", lambda: FakeModule("calm", []))
+    register_module("degraded", lambda: DegradedModule("degraded", []))
+    registry = build_registry({"calm": True, "degraded": True})
+
+    run(registry.start_all(ctx=object(), config={}))
+
+    assert registry.available_names == ("calm",)
+    # 它确实活着（initialize 成功、资源在手），所以仍在可回滚名单里
+    assert registry.started_names == ("calm", "degraded")
+
+
+def test_a_degraded_module_is_still_terminated():
+    """降级不等于失败：它分配过资源，回收时不能漏掉它。"""
+    trace: Trace = []
+    register_module("degraded", lambda: DegradedModule("degraded", trace))
+    registry = build_registry({"degraded": True})
+
+    run(registry.start_all(ctx=object(), config={}))
+    run(registry.stop_all())
+
+    assert trace == [("initialize", "degraded"), ("terminate", "degraded")]
+
+
+def test_stopping_clears_the_degraded_list():
+    """全部停掉之后，没有谁还能是「已装载但不可用」。"""
+    register_module("degraded", lambda: DegradedModule("degraded", []))
+    registry = build_registry({"degraded": True})
+
+    run(registry.start_all(ctx=object(), config={}))
+    run(registry.stop_all())
+
+    assert registry.degraded_modules == ()
+    assert registry.available_names == ()
+
+
+def test_nothing_degraded_keeps_the_old_behaviour():
+    """所有模块正常时，「可用」与「已启动」必须完全一致——既有输出不许被改动。"""
+    register_module("calm", lambda: FakeModule("calm", []))
+    registry = build_registry({"calm": True})
+
+    run(registry.start_all(ctx=object(), config={}))
+
+    assert registry.degraded_modules == ()
+    assert registry.available_names == registry.started_names == ("calm",)
+
+
+def test_available_names_excludes_failed_modules_too():
+    register_module("calm", lambda: FakeModule("calm", []))
+    register_module("boom", lambda: FailInitModule("boom", []))
+    registry = build_registry({"calm": True, "boom": True})
+
+    run(registry.start_all(ctx=object(), config={}))
+
+    assert registry.available_names == ("calm",)
+    assert registry.started_names == ("calm",)
+
+
+def test_a_degraded_module_does_not_block_the_ones_after_it():
+    trace: Trace = []
+    register_module("degraded", lambda: DegradedModule("degraded", trace))
+    register_module("calm", lambda: FakeModule("calm", trace))
+    registry = build_registry({"degraded": True, "calm": True})
+
+    run(registry.start_all(ctx=object(), config={}))
+
+    assert registry.available_names == ("calm",)
+    assert ("initialize", "calm") in trace
+
+
+def test_a_module_whose_status_read_raises_is_reported_as_unusable():
+    """读状态是主路径上新加的一步，而它调的是模块自己的代码——写坏了不许掀翻宿主。
+
+    读不出来时也就不知道它能不能用，所以**不敢说它可用**。
+    """
+    register_module("broken", lambda: RaisingStatusModule("broken", []))
+    registry = build_registry({"broken": True})
+
+    run(registry.start_all(ctx=object(), config={}))
+
+    assert registry.available_names == ()
+    reason = dict(registry.degraded_modules)["broken"]
+    assert "读取模块状态失败" in reason
+    assert "状态读不出来" in reason
+
+
+def test_an_empty_reason_still_counts_as_unusable():
+    """漏写原因不许退化成「看起来可用」——那还是假话。"""
+    register_module("blank", lambda: BlankReasonModule("blank", []))
+    registry = build_registry({"blank": True})
+
+    run(registry.start_all(ctx=object(), config={}))
+
+    assert registry.available_names == ()
+    assert dict(registry.degraded_modules)["blank"]
+
+
+def test_commands_still_reach_a_degraded_module():
+    """它活着，所以要能应答指令、把原因告诉用户——这是「降级」区别于「失败」的地方。"""
+    register_module("degraded", lambda: DegradedModule("degraded", []))
+    registry = build_registry({"degraded": True})
+
+    run(registry.start_all(ctx=object(), config={}))
+
+    assert [module.name for module in registry] == ["degraded"]
+
+
+def test_modules_that_do_not_override_the_status_are_available_by_default():
+    """不改 `unavailable_reason` 的模块一律可用——既有模块因此不受影响。"""
+    register_module("plain", lambda: FakeModule("plain", []))
+    registry = build_registry({"plain": True})
+
+    run(registry.start_all(ctx=object(), config={}))
+
+    assert registry.available_names == ("plain",)
+    assert registry.degraded_modules == ()
+
+
 # --- 未知模块名：必须显式失败 -------------------------------------------------
 
 
@@ -360,8 +532,13 @@ def test_schema_seam_actually_loads_the_shift_module():
     `shift_reminder` —— 只断言「空注册表也不报错」等于什么都没测。
 
     **不写死模块名单**：每加一个模块都得回来改测试的话，这条护栏迟早被人图省事
-    改成 `assert True`。改为「schema 里声明了几个开关，就应当装载出几个模块」，
+    改成 `assert True`。改为「schema 里声明了几个开关，打开几个就应当装载出几个」，
     这样它对新模块自动生效，且仍然钉住「声明与装载必须一致」。
+
+    2026-09-29 修订：原先断言「模块开关应当**默认全开**」。森空岛模块（`skland`）
+    需要用户主动扫码授权，按 SSOT §2.7 的要求**必须默认关**——装上就用不了的模块
+    默认打开，用户会以为插件坏了。所以这条改成按**默认值策略**判：
+    核心模块默认可用；需要授权的模块默认关。
     """
     if not SCHEMA_PATH.is_file():
         pytest.fail(f"缺少配置文件：{SCHEMA_PATH}")
@@ -370,11 +547,20 @@ def test_schema_seam_actually_loads_the_shift_module():
     declared = set(schema["modules"]["items"])
     switches = read_module_switches(_default_config_from_schema(schema))
     assert set(switches) == declared, "schema 声明的开关与解析出来的开关必须一致"
-    assert all(switches.values()), f"schema 里的模块开关应当默认全开，实际 {switches}"
+    assert all(isinstance(value, bool) for value in switches.values()), (
+        f"每个开关的默认值必须是布尔，实际 {switches}"
+    )
+
+    enabled = {name for name, on in switches.items() if on}
+    assert enabled, "至少得有一个模块默认开着，否则用户装上什么也得不到"
+    assert "shift_reminder" in enabled, "换班提醒是本插件的核心，必须默认可用"
+    assert switches.get("skland") is False, (
+        "森空岛需要用户扫码授权，默认必须是关的——默认开着等于装上就报「不可用」"
+    )
 
     discover_modules()
     registry = build_registry(switches)
-    assert set(registry.enabled_names) == declared
+    assert set(registry.enabled_names) == enabled, "装载出来的必须正好是打开的那些"
     assert "shift_reminder" in registry.enabled_names
 
 

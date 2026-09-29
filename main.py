@@ -39,6 +39,16 @@ except ImportError:  # pragma: no cover
 PLUGIN_NAME = "astrbot_plugin_arknights_toolbox"
 
 
+def _list_names(names: tuple[str, ...]) -> str:
+    """把模块名列表拼成人看的文案；空列表给「（无）」而不是空字符串。"""
+    return "、".join(names) or "（无）"
+
+
+def _list_pair_names(pairs: tuple[tuple[str, str], ...]) -> str:
+    """拼出 ``[(模块名, 原因)]`` 里的名字部分（原因另有逐条日志）。"""
+    return "、".join(name for name, _ in pairs) or "（无）"
+
+
 class ArknightsToolbox(Star):
     """明日方舟工具箱：宿主插件。
 
@@ -87,22 +97,32 @@ class ArknightsToolbox(Star):
             raise
         self._registry = registry
 
-        # 失败必须显式可见：逐条 ERROR + 一行汇总。模块自己也可能打日志，
-        # 但用户看的是「哪些功能没了」，这一句是宿主给的交代。
+        # 失败与降级都必须显式可见：逐条 ERROR + 一行汇总。模块自己也可能打日志，
+        # 但用户看的是「哪些功能没了」，这几句是宿主给的交代。
+        #
+        # 「已装载」与「能用」是两件事：模块可能装载成功却干不了活（例如数据文件
+        # 缺失），那种情况必须单独列出来——把它算进「已装载」就是对用户说假话
+        # （项目宪法 §2 第 2 条，2026-09-29 线上实测抓到的缺陷）。
         for name, reason in registry.failed_modules:
             logger.error("[ak_toolbox] 模块 %s 启动失败：%s", name, reason)
-        loaded = "、".join(registry.started_names) or "（无）"
+        for name, reason in registry.degraded_modules:
+            logger.error("[ak_toolbox] 模块 %s 已装载但当前不可用：%s", name, reason)
+
+        degraded = registry.degraded_modules
         failed = registry.failed_modules
-        if failed:
+        if degraded or failed:
             logger.error(
-                "[ak_toolbox] 已装载 %d 个模块（%s），失败 %d 个（%s）——"
-                "失败模块对应的功能不可用，其余功能不受影响",
-                len(registry.started_names),
-                loaded,
+                "[ak_toolbox] 可用模块 %d 个（%s）；已装载但不可用 %d 个（%s）；"
+                "启动失败 %d 个（%s）——不可用模块对应的功能会明确报错，其余功能不受影响",
+                len(registry.available_names),
+                _list_names(registry.available_names),
+                len(degraded),
+                _list_pair_names(degraded),
                 len(failed),
-                "、".join(name for name, _ in failed),
+                _list_pair_names(failed),
             )
         else:
+            loaded = "、".join(registry.available_names) or "（无）"
             logger.info(f"[ak_toolbox] 已装载模块：{loaded}")
 
     async def terminate(self) -> None:
@@ -143,14 +163,24 @@ class ArknightsToolbox(Star):
                 if await module.handle_command(subcommand, event):
                     event.stop_event()
                     return
-        # 兜底：列出**真正起来了**的模块，并把启动失败的也报出来——用户看到
+        # 兜底：列出**真正能用**的模块，并把不可用的也连原因报出来——用户看到
         # 「某个功能没了」时，最需要知道的就是它为什么没了。
-        loaded = "、".join(registry.started_names) or "（无）"
-        lines = [f"未知子命令：{subcommand}", f"已装载的模块：{loaded}"]
+        #
+        # 「已装载但不可用」与「启动失败」分开列：前者能应答指令、还能告诉他怎么修
+        # （例如把数据文件放回去），后者压根没起来。两种情况的处置完全不同。
+        available = _list_names(registry.available_names)
+        degraded = registry.degraded_modules
         failed = registry.failed_modules
-        if failed:
-            lines.append("启动失败的模块（对应功能不可用）：")
-            lines.extend(f"  {name}：{reason}" for name, reason in failed)
+        if degraded or failed:
+            lines = [f"未知子命令：{subcommand}", f"可用模块：{available}"]
+            if degraded:
+                lines.append("已装载但当前不可用的模块：")
+                lines.extend(f"  {name}：{reason}" for name, reason in degraded)
+            if failed:
+                lines.append("启动失败的模块（对应功能不可用）：")
+                lines.extend(f"  {name}：{reason}" for name, reason in failed)
+        else:
+            lines = [f"未知子命令：{subcommand}", f"已装载的模块：{available}"]
         lines.append("可用子命令由各模块提供，见各模块文档。")
         yield event.plain_result("\n".join(lines))
 

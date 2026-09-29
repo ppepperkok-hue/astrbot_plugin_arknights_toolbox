@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from core.registry import discover_modules, known_module_names
+from core.registry import build_registry, discover_modules, known_module_names
 from modules.recruit.dataset import RecruitDataError
 from modules.recruit.module import (
     DEFAULT_MAX_COMBINATIONS,
@@ -211,16 +211,18 @@ def test_default_limits_are_used_when_config_is_empty() -> None:
 # --- 装载失败：必须显式，但**不许**拖垮别的模块 -----------------------------
 
 
+def _boom_data_error() -> None:
+    """模拟数据文件缺失（服务器实测时正是删掉文件触发的）。"""
+    raise RecruitDataError("数据文件不见了")
+
+
 def test_data_failure_does_not_raise_from_initialize(monkeypatch) -> None:
     """`initialize` 抛错会让宿主回滚全部模块、插件整体起不来。
 
     招募数据坏了只说明这个模块没用，不该连累换班提醒——与 §2.7 铁律同一条原则。
     """
 
-    def _boom():
-        raise RecruitDataError("数据文件不见了")
-
-    monkeypatch.setattr("modules.recruit.module.load_data", _boom)
+    monkeypatch.setattr("modules.recruit.module.load_data", _boom_data_error)
 
     ctx = _FakeCtx()
     module = RecruitModule()
@@ -230,6 +232,44 @@ def test_data_failure_does_not_raise_from_initialize(monkeypatch) -> None:
 
     assert "数据文件不见了" in ctx.sent[0]
     assert "换班提醒不受影响" in ctx.sent[0]
+
+
+def test_data_failure_is_reported_to_the_host_not_hidden(monkeypatch) -> None:
+    """光记 ERROR 不够：宿主还得能问出「你到底能不能用」。
+
+    2026-09-29 的缺陷就是日志说不可用、宿主汇总却说已装载——同一件事的两个说法。
+    """
+    monkeypatch.setattr("modules.recruit.module.load_data", _boom_data_error)
+
+    module = RecruitModule()
+    asyncio.run(module.initialize(_FakeCtx(), {}))
+
+    reason = module.unavailable_reason
+    assert reason is not None
+    assert "数据文件不见了" in reason
+
+
+def test_a_healthy_module_reports_no_unavailable_reason() -> None:
+    module = _ready_module(_FakeCtx())
+    assert module.unavailable_reason is None
+
+
+def test_registry_sees_a_data_less_recruit_as_loaded_but_unusable(monkeypatch) -> None:
+    """真实接缝：真模块 + 真注册表——宿主必须把它算成「已装载但不可用」。
+
+    这是 plan.md 待办 8 的原始复现场景。
+    """
+    monkeypatch.setattr("modules.recruit.module.load_data", _boom_data_error)
+
+    discover_modules()
+    registry = build_registry({"recruit": True})
+    asyncio.run(registry.start_all(ctx=_FakeCtx(), config={}))
+
+    assert registry.started_names == ("recruit",)  # 活着
+    assert registry.available_names == ()  # 但干不了活
+    ((name, reason),) = registry.degraded_modules
+    assert name == "recruit"
+    assert "数据文件不见了" in reason
 
 
 # --- 回执路径：平台离线不许冒泡 ---------------------------------------------

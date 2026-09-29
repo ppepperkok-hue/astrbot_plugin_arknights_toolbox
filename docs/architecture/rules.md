@@ -47,7 +47,7 @@
 
 | 规则 | 内容 | 检查手段 |
 | --- | --- | --- |
-| 模块基类 | `core/module.py` 冻结：`name` / `config_key` / `initialize(ctx, config)` / `terminate` / `commands` / `jobs`。**C3 裁决**：`config` 是**该模块自己那一段**配置，由宿主按 `config_key` 取出后传入——模块不得看到整份插件配置 | 新增模块必须通过基类校验 |
+| 模块基类 | `core/module.py` 冻结（**当前第四次修订**，权威定义见 `extension.md` §2）：`name` / `config_key` / `initialize(ctx, config)` / `terminate` / `apply_config(config)`（可选，默认 no-op，第三次修订）/ `unavailable_reason`（property，默认 `None`，第四次修订）/ `handle_command(command, event)`。**C3 裁决**：`config` 是**该模块自己那一段**配置，由宿主按 `config_key` 取出后传入——模块不得看到整份插件配置 | 新增模块必须通过基类校验 |
 | 判定策略 | `Strategy.judge(now) -> Decision`；V1 只有周期策略 | 单测（固定时间点断言判定结果） |
 | 定时任务 | 统一走 `context.cron_manager.add_basic_job`，job 名前缀 `ak_toolbox:` | 单测断言 job 名；`terminate` 按前缀清理 |
 | 指令前缀 | 统一 `/ak <子命令>`（如 `/ak status`、`/ak test`） | review |

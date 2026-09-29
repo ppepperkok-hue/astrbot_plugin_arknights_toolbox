@@ -103,6 +103,7 @@ class ModuleRegistry:
         self._modules: list[Module] = []
         self._started: list[Module] = []
         self._failed: list[tuple[str, str]] = []
+        self._degraded: list[tuple[str, str]] = []
 
     def add(self, module: Module) -> None:
         """把模块放进注册表（装载由 `build_registry` 统一负责）。"""
@@ -127,6 +128,30 @@ class ModuleRegistry:
         """
         return tuple(self._failed)
 
+    @property
+    def degraded_modules(self) -> tuple[tuple[str, str], ...]:
+        """**已装载但干不了活**的模块：``(模块名, 原因)``。
+
+        与 ``failed_modules`` 的区别在「起没起来」：这里的模块 ``initialize`` 成功、
+        资源已分配、指令也答得上，只是关键能力缺失（例如数据文件没找到）。它们同时
+        也在 ``started_names`` 里，所以 ``stop_all`` 会照常回收它们。
+
+        只在 ``initialize`` 成功返回后**查询一次** ``Module.unavailable_reason`` 并
+        记录：查询点固定（「已装载」这句话要覆盖的正是装载那一刻），也避免模块自己的
+        代码在展示路径上抛异常。
+        """
+        return tuple(self._degraded)
+
+    @property
+    def available_names(self) -> tuple[str, ...]:
+        """名副其实**能用**的模块名：已启动、且没有自报不可用。
+
+        汇总日志与用户可见的状态一律用这个，**不要**用 ``started_names``——
+        「已装载」里混着用不了的模块就是在对用户说谎（项目宪法 §2 第 2 条）。
+        """
+        degraded = {name for name, _ in self._degraded}
+        return tuple(module.name for module in self._started if module.name not in degraded)
+
     def __iter__(self) -> Iterator[Module]:
         return iter(self._modules)
 
@@ -148,6 +173,10 @@ class ModuleRegistry:
         注意「失败」只捕获 ``Exception``：``BaseException``（如取消、退出信号）
         照旧向上传播，那些不是模块的错误，不该被当作「这条路不行」吞掉。
 
+        ``initialize`` 成功但模块**自报不可用**（见 ``Module.unavailable_reason``）的，
+        既进 ``started_names``（它确实活着、要回收）也进 ``degraded_modules``——
+        「已装载」与「能用」是两件事，混为一谈就会对用户说假话。
+
         Args:
             ctx: AstrBot 的 ``Context``，原样转交给每个模块。
             config: 整份插件配置；非 Mapping 时按缺省处理。
@@ -155,6 +184,7 @@ class ModuleRegistry:
         sections: Mapping[str, Any] = config if isinstance(config, Mapping) else {}
         self._started = []
         self._failed = []
+        self._degraded = []
         for module in self._modules:
             section = sections.get(module.config_key)
             try:
@@ -166,6 +196,9 @@ class ModuleRegistry:
                 self._failed.append((module.name, f"{type(exc).__name__}: {exc}"))
                 continue
             self._started.append(module)
+            reason = _read_unavailable_reason(module)
+            if reason is not None:
+                self._degraded.append((module.name, reason))
 
     async def stop_all(self) -> None:
         """回收**已成功启动**的模块（调用其 ``terminate``）。
@@ -173,10 +206,15 @@ class ModuleRegistry:
         只处理 ``_started`` 里的模块：启动中途失败时，没初始化过的模块不会被
         ``terminate`` 误伤。跑完即清空 ``_started``，因此**重复调用是幂等的**。
 
+        ``_degraded`` 随 ``_started`` 一起清空——它描述的是「当前已启动的模块」，
+        全部停掉之后没有谁还能是「已装载但不可用」。``_failed`` 不清：它记的是
+        **上一次启动尝试**的事实，而那些模块从未启动过，谈不上被停止。
+
         单个模块清理失败**不阻断**其余模块的清理；全部跑完后把失败汇总抛出，
         既不静默吞错，也不留下没清理干净的模块。
         """
         modules, self._started = self._started, []
+        self._degraded = []
         failures: list[str] = []
         for module in modules:
             try:
@@ -185,6 +223,27 @@ class ModuleRegistry:
                 failures.append(f"{module.name}: {exc!r}")
         if failures:
             raise RuntimeError("以下模块的 terminate 失败：" + "；".join(failures))
+
+
+def _read_unavailable_reason(module: Module) -> str | None:
+    """问模块「你现在能用吗」，返回 ``None`` 表示可用，否则返回给用户看的原因。
+
+    为什么把模块的代码包起来：这是「所有模块都正常」这条主路径上新加的一步，而它
+    调用的是各模块自己的实现。模块写坏了不该在装载阶段掀翻宿主——那正是本机制要
+    防的「一个模块拖垮全部」。**读不出来时不敢说它可用**，所以归入不可用并留下
+    异常原文；用户看到的是「读取状态失败」，而不是一片沉默。
+
+    空字符串也按不可用处理（换成占位文案），理由同上：漏写原因不该退化成
+    「看起来可用」，那还是假话。判定规则因此只有一条：``None`` 即可用。
+    """
+    try:
+        reason = module.unavailable_reason
+    except Exception as exc:  # noqa: BLE001 - 见上：宁可报不可用，也不冒泡
+        return f"读取模块状态失败：{type(exc).__name__}: {exc}"
+    if reason is None:
+        return None
+    text = str(reason).strip()
+    return text or "模块自报不可用，但未给出原因"
 
 
 def build_registry(enabled: Mapping[str, bool]) -> ModuleRegistry:
