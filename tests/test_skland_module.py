@@ -369,11 +369,14 @@ def test_authorised_state_is_reported_without_leaking_secrets(data_root: Path) -
 
 def test_stored_credential_is_valid_json_on_disk(data_root: Path) -> None:
     """落盘的是合法 JSON（原子替换由 core.storage 保证，这里验结果形状）。"""
+    from core.storage import JsonStateStore
     from modules.skland.credentials import SklandCredential, SklandCredentialStore
 
     plugin_dir = data_root / PLUGIN_NAME
     plugin_dir.mkdir(parents=True, exist_ok=True)
-    SklandCredentialStore(plugin_dir).save(SklandCredential(cred="c", token="t", user_id="u"))
+    # 装配层注入 store；测试照做（见 StoreLike 的说明）。
+    store = SklandCredentialStore(JsonStateStore(plugin_dir / CREDENTIALS_FILENAME))
+    store.save(SklandCredential(cred="c", token="t", user_id="u"))
 
     payload = json.loads((plugin_dir / CREDENTIALS_FILENAME).read_text(encoding="utf-8"))
     assert payload == {"cred": "c", "token": "t", "user_id": "u"}

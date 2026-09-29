@@ -11,13 +11,14 @@ from pathlib import Path
 
 import pytest
 
-from core.storage import CorruptedStoreError
+from core.storage import JsonStateStore
 from modules.skland.credentials import (
     CRED_FIELD,
     CREDENTIALS_FILENAME,
     TOKEN_FIELD,
     USER_ID_FIELD,
     CredentialState,
+    CredentialStoreError,
     SklandCredential,
     SklandCredentialStore,
 )
@@ -27,7 +28,8 @@ TOKEN = "fake-token-value-abcdefghij"
 
 
 def _store(tmp_path: Path) -> SklandCredentialStore:
-    return SklandCredentialStore(tmp_path)
+    """装配层在真实运行时注入 `JsonStateStore`；测试照做（见 StoreLike 的说明）。"""
+    return SklandCredentialStore(JsonStateStore(tmp_path / CREDENTIALS_FILENAME))
 
 
 def _write_raw(tmp_path: Path, payload: object) -> Path:
@@ -131,7 +133,7 @@ def test_refuses_to_overwrite_a_corrupt_file(tmp_path: Path) -> None:
     """覆盖坏档会掩掉「它曾经坏过」这个事实，所以宁可拒绝。"""
     _write_raw(tmp_path, "definitely not json")
 
-    with pytest.raises(CorruptedStoreError):
+    with pytest.raises(CredentialStoreError):
         _store(tmp_path).save(SklandCredential(cred=CRED, token=TOKEN))
 
 

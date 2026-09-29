@@ -23,8 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-
-from core.storage import CorruptedStoreError, JsonStateStore
+from typing import Protocol, runtime_checkable
 
 __all__ = [
     "CREDENTIALS_FILENAME",
@@ -33,8 +32,10 @@ __all__ = [
     "USER_ID_FIELD",
     "CredentialState",
     "CredentialStatus",
+    "CredentialStoreError",
     "SklandCredential",
     "SklandCredentialStore",
+    "StoreLike",
 ]
 
 #: 凭据存档文件名。固定名，不由任何外部输入拼成（路径穿越在源头就没有机会）。
@@ -43,6 +44,32 @@ CREDENTIALS_FILENAME = "skland_credentials.json"
 CRED_FIELD = "cred"
 TOKEN_FIELD = "token"
 USER_ID_FIELD = "user_id"
+
+
+class CredentialStoreError(Exception):
+    """存档存在但读不出来。
+
+    **本模块刻意不 import `core.storage`**：纯逻辑层依赖宿主层会让这个文件在
+    AstrBot 的加载环境里 import 失败（`core` 不在 `sys.path` 上），而给纯逻辑
+    文件开相对导入豁免等于放宽架构红线。所以这里按 `webapi.py` 的既有先例，
+    用 :class:`StoreLike` 声明所需的形状，由装配层注入真实实现，并把它的
+    「坏档」异常在本层归一化成这个类型。
+    """
+
+
+@runtime_checkable
+class StoreLike(Protocol):
+    """`core.storage.JsonStateStore` 结构上匹配的最小面。
+
+    只声明本模块真正用到的三样：路径、按 key 读、按 key 写。
+    """
+
+    @property
+    def path(self) -> Path: ...
+
+    def get(self, key: str, default: object = ...) -> object: ...
+
+    def set(self, key: str, value: object) -> None: ...
 
 
 class CredentialState(StrEnum):
@@ -128,8 +155,9 @@ class SklandCredentialStore:
     AstrBot 的指令处理是单事件循环上的协程，而落盘是毫秒级操作。
     """
 
-    def __init__(self, directory: Path) -> None:
-        self._store = JsonStateStore(Path(directory) / CREDENTIALS_FILENAME)
+    def __init__(self, store: StoreLike) -> None:
+        """`store` 由装配层注入（见 :class:`StoreLike` 的说明）。"""
+        self._store = store
 
     @property
     def path(self) -> Path:
@@ -140,7 +168,7 @@ class SklandCredentialStore:
         """读状态。**本方法永不抛异常**——它在模块装载路径上被调用。"""
         try:
             data = self._read_fields()
-        except CorruptedStoreError as exc:
+        except CredentialStoreError as exc:
             return CredentialStatus(CredentialState.CORRUPT, str(exc))
 
         if data is None:
@@ -188,7 +216,7 @@ class SklandCredentialStore:
         """写入凭据（覆盖旧值）。
 
         Raises:
-            CorruptedStoreError: 已有存档坏掉时**拒绝写入**。
+            CredentialStoreError: 已有存档坏掉时**拒绝写入**。
                 覆盖一个读不出来的存档会掩掉「它曾经坏过」这个事实；
                 宁可让用户先删掉它，也不要静默吞掉异常。
             TypeError: 传入的不是 `SklandCredential`。
@@ -224,11 +252,14 @@ class SklandCredentialStore:
         """
         if not self._store.path.is_file():
             return None
-        return {
-            CRED_FIELD: self._store.get(CRED_FIELD),
-            TOKEN_FIELD: self._store.get(TOKEN_FIELD),
-            USER_ID_FIELD: self._store.get(USER_ID_FIELD, ""),
-        }
+        try:
+            return {
+                CRED_FIELD: self._store.get(CRED_FIELD),
+                TOKEN_FIELD: self._store.get(TOKEN_FIELD),
+                USER_ID_FIELD: self._store.get(USER_ID_FIELD, ""),
+            }
+        except Exception as exc:  # noqa: BLE001 - 归一化成本层异常，见 CredentialStoreError
+            raise CredentialStoreError(str(exc)) from exc
 
 
 def _non_empty_str(value: object) -> bool:

@@ -50,11 +50,13 @@ from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 try:  # pragma: no cover - 走哪支取决于运行场景，两支都是真实路径
     from core.module import Module
     from core.permission import session_allowed
+    from core.storage import JsonStateStore
 except ImportError:  # pragma: no cover
     from ...core.module import Module
     from ...core.permission import session_allowed
+    from ...core.storage import JsonStateStore
 
-from .credentials import CredentialState, SklandCredentialStore
+from .credentials import CREDENTIALS_FILENAME, CredentialState, SklandCredentialStore
 
 COMMAND_NAMES = ("skland",)
 
@@ -107,7 +109,7 @@ class SklandModule(Module):
             self._store = None
             raise SklandSetupError(f"数据目录准备失败：{type(exc).__name__}: {exc}") from exc
 
-        self._store = SklandCredentialStore(data_dir)
+        self._store = SklandCredentialStore(JsonStateStore(data_dir / CREDENTIALS_FILENAME))
 
         status = self._store.status()
         if status.state is CredentialState.CORRUPT:
