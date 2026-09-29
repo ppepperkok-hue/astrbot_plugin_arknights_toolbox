@@ -24,9 +24,11 @@ from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 # 先绝对、失败再回退相对，两种场景都能工作；注册表的自动发现也才 import 得动它。
 try:  # pragma: no cover - 走哪支取决于运行场景，两支都是真实路径
     from core.module import Module
+    from core.permission import session_allowed
     from core.storage import JsonlSendLog, JsonStateStore, SendRecord
 except ImportError:  # pragma: no cover
     from ...core.module import Module
+    from ...core.permission import session_allowed
     from ...core.storage import JsonlSendLog, JsonStateStore, SendRecord
 from . import notify, roster, scheduler, webapi
 from .schedule import ConfigError, Shift, ShiftTable, parse_hhmm, validate
@@ -48,40 +50,9 @@ SEND_LOG_KEEP = 50
 STATUS_RECENT = 5
 DEFAULT_LEAD_MINUTES = 10
 
-# 指令权限模型：私聊一律放行；群聊要求 AstrBot 管理员。
+# 指令权限模型：私聊一律放行；群聊要求 AstrBot 管理员。**规则实现在 `core/permission.py`**，
+# 这里只保留本模块自己的子命令清单（用于分发与提示文案）。
 COMMAND_NAMES = ("bind", "status", "test", "import")
-
-
-def command_allowed(command: str, *, is_group: bool, is_admin: bool) -> tuple[bool, str]:
-    """判定某个 `/ak` 子命令是否允许在此会话执行。
-
-    规则：
-
-    - **私聊无条件允许**。私聊里 `bind` 只把提醒指向发起者自己。旧模型「只允许
-      已绑定的那个会话」会让改绑彻底死锁——绑了 A 就再也换不到 B，A 那个号
-      一旦掉线，功能永久锁死（服务器上已实证）。
-    - **群聊仅限 AstrBot 管理员**。群里 `bind` 会把提醒推到整个群，可能打扰他人；
-      这才是真正需要防的对象。
-
-    纯函数，不 import 框架，可直接单测。
-
-    Args:
-        command: 子命令名，见 `COMMAND_NAMES`。
-        is_group: 事件是否来自群聊。
-        is_admin: 发起者是否 AstrBot 管理员（`AstrMessageEvent.is_admin()`）。
-
-    Returns:
-        `(是否允许, 拒绝原因)`；允许时原因恒为空字符串。
-    """
-    if command not in COMMAND_NAMES:
-        return False, f"未知子命令：{command}。可用：{'、'.join(COMMAND_NAMES)}。"
-    if not is_group or is_admin:
-        return True, ""
-    return False, (
-        "群聊里只有 AstrBot 管理员能操作换班提醒：在群里绑定会把提醒发到整个群，"
-        "可能打扰其他成员。"
-        "想自己收提醒，请私聊我发 /ak bind（私聊不需要管理员）。"
-    )
 
 
 def parse_shift_table(config: Mapping[str, Any]) -> ShiftTable:
@@ -544,10 +515,10 @@ class ShiftReminderModule(Module):
         # `is_admin()` 在 :268（其 `role` 由 waking_check/stage.py:105 依据配置的
         # `admins_id` 置为 "admin"）。直接调用，拿不到就抛——不让权限判定的失败
         # 静默降级成「放行」。
-        allowed, reason = command_allowed(
-            command,
+        allowed, reason = session_allowed(
             is_group=not event.is_private_chat(),
             is_admin=event.is_admin(),
+            action="操作换班提醒",
         )
         if not allowed:
             await self._reply(event, reason)

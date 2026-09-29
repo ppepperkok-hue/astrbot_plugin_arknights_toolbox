@@ -32,8 +32,10 @@ from astrbot.api.event import MessageChain
 # 先绝对、失败再回退相对，注册表的自动发现才 import 得动它。
 try:  # pragma: no cover - 走哪支取决于运行场景，两支都是真实路径
     from core.module import Module
+    from core.permission import session_allowed
 except ImportError:  # pragma: no cover
     from ...core.module import Module
+    from ...core.permission import session_allowed
 
 from .dataset import RecruitData, RecruitDataError, load_data
 from .parsing import parse_tags
@@ -71,26 +73,6 @@ def read_limit(config: Mapping[str, Any], key: str, default: int) -> int:
         )
         return LIMIT_CEILING
     return raw
-
-
-def command_allowed(*, is_group: bool, is_admin: bool) -> tuple[bool, str]:
-    """判定 `/ak recruit` 能不能在这个会话里执行。
-
-    规则与换班提醒一致：**私聊一律放行**（只影响发起者自己看结果）；**群聊仅限
-    AstrBot 管理员**（群里跑一次会把结果发给所有人，属于打扰他人）。
-
-    ⚠ **已知重复**：`modules/shift_reminder/module.py` 里有一份同样的判定。契约
-    禁止模块互相 import（`docs/architecture/extension.md` §2），所以要么各留一份、
-    要么提到 `core/`。提到 core 属于动地基，本包按任务包要求**没有擅自改核心**，
-    已在回报里提请总监裁决——**在两处都改之前，改权限模型必须同时改两个文件**。
-    """
-    if not is_group or is_admin:
-        return True, ""
-    return (
-        False,
-        "群聊里只有 AstrBot 管理员能查公开招募：结果会发给群里所有人，可能打扰其他成员。"
-        "想自己查，私聊我发 /ak recruit 就行。",
-    )
 
 
 class RecruitModule(Module):
@@ -153,9 +135,10 @@ class RecruitModule(Module):
         if command not in COMMAND_NAMES:
             return False
 
-        allowed, reason = command_allowed(
+        allowed, reason = session_allowed(
             is_group=not event.is_private_chat(),
             is_admin=event.is_admin(),
+            action="查公开招募",
         )
         if not allowed:
             await self._reply(event, reason)

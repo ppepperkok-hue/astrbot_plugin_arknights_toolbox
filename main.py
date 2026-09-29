@@ -60,10 +60,15 @@ class ArknightsToolbox(Star):
     async def initialize(self) -> None:
         """插件被激活时调用：解析开关 → 装载模块 → 启动。
 
-        启动中途失败时**必须自己回滚**已经起来的模块：框架在 ``initialize``
-        抛异常时只做状态清理，**不会调用** ``terminate()``（已核实 AstrBot 4.28.1
-        ``core/star/star_manager.py:1421/1436/1452``；``terminate()`` 仅见于
-        ``:1963`` 的停用/重载路径）。不回滚就会留下已注册定时任务的"半个模块"。
+        **逐模块隔离失败**：某个模块（例如依赖外部数据源的那个）起不来时，
+        其余模块照常启动，插件本身也照常可用——它仍能告诉用户「哪个模块挂了、
+        为什么」。这是「森空岛失效绝不许拖垮核心功能」那条铁律的宿主层形态。
+
+        仍然保留回滚：``build_registry`` 抛错（未知模块名）时还没启动任何模块，
+        无需回滚；而 ``BaseException``（取消、退出信号）不属于「模块失败」，
+        照旧上抛并回收已启动的模块——框架在 ``initialize`` 抛异常时只做状态清理，
+        **不会调用** ``terminate()``（已核实 AstrBot 4.28.1
+        ``core/star/star_manager.py:1421/1436/1452``）。
         """
         self._registry = None
         # 自动发现 modules/ 下的模块包。宿主**不认识任何具体功能**（架构红线，
@@ -81,8 +86,24 @@ class ArknightsToolbox(Star):
                 logger.exception("[ak_toolbox] 启动失败后回滚模块时又出错")
             raise
         self._registry = registry
-        loaded = "、".join(registry.enabled_names) or "（无）"
-        logger.info(f"[ak_toolbox] 已装载模块：{loaded}")
+
+        # 失败必须显式可见：逐条 ERROR + 一行汇总。模块自己也可能打日志，
+        # 但用户看的是「哪些功能没了」，这一句是宿主给的交代。
+        for name, reason in registry.failed_modules:
+            logger.error("[ak_toolbox] 模块 %s 启动失败：%s", name, reason)
+        loaded = "、".join(registry.started_names) or "（无）"
+        failed = registry.failed_modules
+        if failed:
+            logger.error(
+                "[ak_toolbox] 已装载 %d 个模块（%s），失败 %d 个（%s）——"
+                "失败模块对应的功能不可用，其余功能不受影响",
+                len(registry.started_names),
+                loaded,
+                len(failed),
+                "、".join(name for name, _ in failed),
+            )
+        else:
+            logger.info(f"[ak_toolbox] 已装载模块：{loaded}")
 
     async def terminate(self) -> None:
         """插件被停用或重载时调用：先停模块，再释放自身引用。
@@ -112,16 +133,26 @@ class ArknightsToolbox(Star):
         """
         subcommand = self._parse_subcommand(event.message_str)
         registry = self._registry
+        if registry is None:
+            yield event.plain_result(
+                f"未知子命令：{subcommand}\n插件尚未装载任何模块，请检查日志。"
+            )
+            return
         if registry is not None:
             for module in registry:
                 if await module.handle_command(subcommand, event):
                     event.stop_event()
                     return
-        loaded = "、".join(registry.enabled_names) if registry is not None else "（无）"
-        yield event.plain_result(
-            f"未知子命令：{subcommand}\n当前已装载的模块：{loaded}\n"
-            "可用子命令由各模块提供，见各模块文档。"
-        )
+        # 兜底：列出**真正起来了**的模块，并把启动失败的也报出来——用户看到
+        # 「某个功能没了」时，最需要知道的就是它为什么没了。
+        loaded = "、".join(registry.started_names) or "（无）"
+        lines = [f"未知子命令：{subcommand}", f"已装载的模块：{loaded}"]
+        failed = registry.failed_modules
+        if failed:
+            lines.append("启动失败的模块（对应功能不可用）：")
+            lines.extend(f"  {name}：{reason}" for name, reason in failed)
+        lines.append("可用子命令由各模块提供，见各模块文档。")
+        yield event.plain_result("\n".join(lines))
 
     @staticmethod
     def _parse_subcommand(message_str: str) -> str:

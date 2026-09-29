@@ -20,7 +20,6 @@ from modules.recruit.module import (
     DEFAULT_MAX_OPERATORS,
     LIMIT_CEILING,
     RecruitModule,
-    command_allowed,
     read_limit,
 )
 from modules.recruit.parsing import parse_tags
@@ -99,25 +98,6 @@ def test_read_limit_falls_back_on_below_one(bad: int) -> None:
 def test_read_limit_clamps_to_the_ceiling() -> None:
     """配成 1000 会让一条 QQ 消息长到没法看，压到上限而不是照单全收。"""
     assert read_limit({"max_operators": 1000}, "max_operators", 20) == LIMIT_CEILING
-
-
-# --- command_allowed（与换班提醒同一模型） ---------------------------------
-
-
-def test_private_chat_is_always_allowed() -> None:
-    allowed, reason = command_allowed(is_group=False, is_admin=False)
-    assert allowed is True
-    assert reason == ""
-
-
-def test_group_admin_is_allowed() -> None:
-    assert command_allowed(is_group=True, is_admin=True)[0] is True
-
-
-def test_group_non_admin_is_refused_with_an_actionable_reason() -> None:
-    allowed, reason = command_allowed(is_group=True, is_admin=False)
-    assert allowed is False
-    assert "/ak recruit" in reason
 
 
 # --- parse_tags -------------------------------------------------------------

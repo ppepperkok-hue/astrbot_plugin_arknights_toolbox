@@ -185,18 +185,50 @@ def test_module_without_usable_section_receives_empty_dict(config):
 
 
 def test_failed_start_tracks_only_successfully_started_modules():
+    """一个模块起不来不再抛出：失败被记下，其余模块照常。
+
+    旧语义是「任一模块失败即抛出，宿主回滚全部」——那等于让一个数据源挂掉
+    拖垮整个插件。现在改成逐模块隔离（见 `ModuleRegistry.start_all`）。
+    """
     trace: Trace = []
     register_module("calm", lambda: FakeModule("calm", trace))
     register_module("boom", lambda: FailInitModule("boom", trace))
     registry = build_registry({"calm": True, "boom": True})
 
-    with pytest.raises(RuntimeError, match="boom"):
-        run(registry.start_all(ctx=object(), config={}))
+    run(registry.start_all(ctx=object(), config={}))
 
     # 只有成功启动的 calm 进入可回滚名单；boom 自己的清理是它的责任
     assert registry.started_names == ("calm",)
     assert ("initialize", "calm") in trace
     assert ("initialize", "boom") in trace
+
+
+def test_failed_module_is_recorded_with_a_reason():
+    """失败必须带着原因留下来——用户问「为什么这个功能没了」时要有答案。"""
+    register_module("calm", lambda: FakeModule("calm", []))
+    register_module("boom", lambda: FailInitModule("boom", []))
+    registry = build_registry({"calm": True, "boom": True})
+
+    run(registry.start_all(ctx=object(), config={}))
+
+    failed = registry.failed_modules
+    assert len(failed) == 1
+    name, reason = failed[0]
+    assert name == "boom"
+    assert reason  # 非空，且调用方不需要再去翻日志才知道原因
+
+
+def test_a_failing_module_does_not_block_the_ones_after_it():
+    """顺序很重要：失败的那个排在前面时，后面的仍要起来。"""
+    trace: Trace = []
+    register_module("boom", lambda: FailInitModule("boom", trace))
+    register_module("calm", lambda: FakeModule("calm", trace))
+    registry = build_registry({"boom": True, "calm": True})
+
+    run(registry.start_all(ctx=object(), config={}))
+
+    assert registry.started_names == ("calm",)
+    assert ("initialize", "calm") in trace
 
 
 def test_stop_after_failed_start_only_terminates_started_modules():
@@ -205,8 +237,7 @@ def test_stop_after_failed_start_only_terminates_started_modules():
     register_module("boom", lambda: FailInitModule("boom", trace))
     registry = build_registry({"calm": True, "boom": True})
 
-    with pytest.raises(RuntimeError):
-        run(registry.start_all(ctx=object(), config={}))
+    run(registry.start_all(ctx=object(), config={}))
     run(registry.stop_all())
 
     assert trace == [

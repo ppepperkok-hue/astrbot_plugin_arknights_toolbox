@@ -89,15 +89,20 @@ def read_module_switches(config: Mapping[str, Any] | None) -> dict[str, bool]:
 class ModuleRegistry:
     """一批已装载模块的持有者。
 
-    区分「在册」与「已启动」两件事：``add`` 只把模块放进名单，
-    真正调用过 ``initialize`` 且成功的才会进入 ``_started``；
+    区分「在册」「已启动」「启动失败」三件事：``add`` 只把模块放进名单，
+    真正调用过 ``initialize`` 且成功的才会进入 ``_started``；失败的进 ``_failed``。
     ``stop_all`` 只回收 ``_started``。这个区分是失败回滚的依据——
-    启动中途失败时，没启动的模块不该被 ``terminate``。
+    启动失败的模块不该被 ``terminate``。
+
+    **逐模块隔离失败**：一个模块起不来**不阻断其余模块**（见 ``start_all``）。
+    这条是「森空岛失效绝不许拖垮核心功能」那条铁律的宿主层形态——与其让每个
+    模块自己想办法「不抛异常」，不如让宿主本来就不怕某个模块抛。
     """
 
     def __init__(self) -> None:
         self._modules: list[Module] = []
         self._started: list[Module] = []
+        self._failed: list[tuple[str, str]] = []
 
     def add(self, module: Module) -> None:
         """把模块放进注册表（装载由 `build_registry` 统一负责）。"""
@@ -113,6 +118,15 @@ class ModuleRegistry:
         """已经成功 ``initialize`` 过的模块名（回滚与诊断用）。"""
         return tuple(module.name for module in self._started)
 
+    @property
+    def failed_modules(self) -> tuple[tuple[str, str], ...]:
+        """启动失败的模块：``(模块名, 失败原因)``，供宿主报给用户与日志。
+
+        保留原因而不是只留名字——用户看到「recruit 起不来」时，
+        下一句一定是「为什么」，而那时日志可能已经滚掉了。
+        """
+        return tuple(self._failed)
+
     def __iter__(self) -> Iterator[Module]:
         return iter(self._modules)
 
@@ -126,8 +140,13 @@ class ModuleRegistry:
         该段缺失或类型不对时传空字典——模块之间因此互不知情
         （见 docs/implementation/implementation.md「模块如何取得自己的配置」）。
 
-        任一模块失败即抛出，不吞错——加载失败必须让人当场看见。
-        已经成功启动的模块记在 ``started_names`` 里，供调用方回滚。
+        **单个模块失败不阻断其余模块**：失败的记进 ``failed_modules`` 并继续，
+        一个数据源挂掉不该让整个插件起不来。失败**必须**由调用方显式报告
+        （宿主会写 ERROR 日志并在指令里告诉用户），不允许静默——本方法自己
+        不打印，因为它是纯逻辑层，日志属于装配层的职责。
+
+        注意「失败」只捕获 ``Exception``：``BaseException``（如取消、退出信号）
+        照旧向上传播，那些不是模块的错误，不该被当作「这条路不行」吞掉。
 
         Args:
             ctx: AstrBot 的 ``Context``，原样转交给每个模块。
@@ -135,12 +154,17 @@ class ModuleRegistry:
         """
         sections: Mapping[str, Any] = config if isinstance(config, Mapping) else {}
         self._started = []
+        self._failed = []
         for module in self._modules:
             section = sections.get(module.config_key)
-            await module.initialize(
-                ctx,
-                section if isinstance(section, Mapping) else {},
-            )
+            try:
+                await module.initialize(
+                    ctx,
+                    section if isinstance(section, Mapping) else {},
+                )
+            except Exception as exc:  # noqa: BLE001 - 逐模块隔离，失败要记录而非上抛
+                self._failed.append((module.name, f"{type(exc).__name__}: {exc}"))
+                continue
             self._started.append(module)
 
     async def stop_all(self) -> None:
