@@ -19,6 +19,7 @@
 | 规则 | 内容 | 检查手段 |
 | --- | --- | --- |
 | **纯逻辑不得依赖框架** | `modules/*/schedule.py`、`notify.py`、配置校验等**不许 import astrbot** | **ruff 的 `flake8-tidy-imports`（`TID`）禁入规则**，CI 必过 |
+| **纯逻辑不得依赖宿主层 `core`** | 纯逻辑文件（`modules/<名>/*.py`，`module.py` 除外）**不许 import `core`**：AstrBot 把插件当包加载时顶层没有 `core`，绝对导入会 `ModuleNotFoundError` 并**掀翻整个插件的加载**（2026-09-29 实测）。需要宿主能力时按 `modules/shift_reminder/webapi.py` 的写法：用 `Protocol` 声明所需形状、由装配层注入 | **`scripts/check_astrbot_load_form.py`**（在模拟 AstrBot 加载形态的子进程里导入全部模块与纯逻辑文件），CI 必过；`pytest` 里由 `tests/test_astrbot_load_form.py` 同跑一份 |
 | 模块不得依赖宿主入口 | `modules/` 下不得 import `main.py` | 同上（禁止 import `main`） |
 | 禁止循环依赖 | 模块之间不互相 import；跨模块协作走 `core/module.py` 定义的口子 | review + 目录结构约束 |
 | 模块间耦合唯一出口 | 判定策略接口（V1 只有周期策略） | 接口签名在 `core/module.py` 冻结 |
@@ -79,9 +80,16 @@
 | 手段 | 覆盖的规则域 |
 | --- | --- |
 | `ruff check` + `ruff format --check` | 风格、依赖方向（禁 import astrbot / logging）、bare except |
-| `pytest` | 配置校验、时刻计算、渲染、策略、失败与熔断 |
-| CI（GitHub Actions） | 上面两条的复现 |
+| `pytest` | 配置校验、时刻计算、渲染、策略、失败与熔断；**含 `tests/test_astrbot_load_form.py`（AstrBot 加载形态）** |
+| `python scripts/check_astrbot_load_form.py` | **「本地绿、线上挂」的环境差异**：插件入口、模块入口与纯逻辑文件在「插件被当包加载、顶层无 `core`」的形态下能否导入 |
+| `python scripts/check_room_colours.py` | 服务端房型 key 与样式表选择器的跨边界一致性（「静默匹配不上」那一类） |
+| CI（GitHub Actions） | 上面几条的复现 |
 | 手动验证清单 | 框架胶水层与真实推送 |
 | review | 命名、密钥、数据位置、契约一致性 |
+
+> **关于「本地绿、线上挂」的护栏边界**：`check_astrbot_load_form.py` 只证明**导入形态**
+> 没问题，**不保证部署一定成功**——真实环境还有版本行为、依赖、`_conf_schema.json`
+> 渲染、网络与凭据等本地模拟不出来的差异；也覆盖不到 `.gitignore` 那类**打包/发布**
+> 差异（2026-09-29 第一次事故就是那种，要靠「按 git 内容打包再验」）。别把它当保证线。
 
 > 规则变更走「先改本文档 → 再改代码 → 提交信息说明原因」，不许悄悄改。

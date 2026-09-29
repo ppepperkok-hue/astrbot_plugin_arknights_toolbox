@@ -1,6 +1,8 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# 刻意不在这里放 addopts：文档与 CI 都按 `pytest -q` 写，两边叠加会变成 `-qq`，
+# 而 `-qq` 会**吃掉汇总行**（"N passed" 那行），于是没人看得见测试数。
+# 静默程度交给调用方显式指定，命令行与文档就始终是同一句话。
 python_files = ["test_*.py"]
 # 让测试可以直接 import modules.*（纯逻辑层不依赖 AstrBot）
 pythonpath = ["."]

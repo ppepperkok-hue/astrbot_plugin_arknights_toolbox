@@ -123,8 +123,10 @@ git clone https://github.com/ppepperkok-hue/astrbot_plugin_arknights_toolbox.git
 本地验证一条命令：
 
 ```bash
-python scripts/verify_constitution.py && ruff check . && ruff format --check . && pytest -q
+python scripts/verify_constitution.py && ruff check . && ruff format --check . && pytest -q && python scripts/check_room_colours.py && python scripts/check_astrbot_load_form.py
 ```
+
+最后那条 `check_astrbot_load_form.py` 值得单独说一句：它按 **AstrBot 真实的加载形态**（插件被当包加载、顶层没有 `core`）在子进程里导入整个插件。这一类缺陷**本地普通测试看不见**——本项目为此吃过两次亏，其中一次是 695 条测试全绿、部署上去整个插件装不起来。
 
 ## 许可证
 

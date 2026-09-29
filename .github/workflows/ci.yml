@@ -42,3 +42,13 @@ jobs:
       #   - CSS var typo (--border when the token is --line)
       - name: Cross-check room colour keys against server room order
         run: python scripts/check_room_colours.py
+
+      # Guards "green locally, broken when deployed": import the plugin the way
+      # AstrBot does (as a package, with no top-level `core`) and require every
+      # module entry plus every pure-logic file to import. On 2026-09-29 an
+      # absolute `from core.storage import ...` passed all 694 tests and then
+      # unloaded the entire plugin on the server.
+      # Pytest already runs this via tests/test_astrbot_load_form.py; this step
+      # exists so the failure is legible in the CI log instead of buried.
+      - name: Plugin imports under AstrBot's load form
+        run: python scripts/check_astrbot_load_form.py

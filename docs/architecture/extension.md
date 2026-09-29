@@ -85,6 +85,8 @@ class Module(ABC):
 ## 3. 接入检查单
 
 - [ ] 纯逻辑文件**没有** `import astrbot`（`ruff` 的 `TID` 禁入会拦）
+- [ ] 纯逻辑文件**没有** `import core`：AstrBot 把插件当包加载时顶层没有 `core`，绝对导入会 `ModuleNotFoundError`，并**掀翻整个插件的加载**（2026-09-29 实测：694 条测试全绿、线上三个模块全被卸载）。需要宿主能力时用 `Protocol` 声明形状、由装配层注入（见 `modules/shift_reminder/webapi.py`）
+- [ ] **跑 `python scripts/check_astrbot_load_form.py` 通过**——它在模拟 AstrBot 加载形态的子进程里导入插件入口、每个模块入口与纯逻辑文件（`pytest` 里由 `tests/test_astrbot_load_form.py` 同跑一份）
 - [ ] 模块名在 `_conf_schema.json` 里有独立开关，默认值明确
 - [ ] `terminate()` 清理自己注册的 job（按 `ak_toolbox:<module>:` 前缀）
 - [ ] 测试覆盖该模块的边界条件（参照 [rules.md](rules.md) §6 的必测清单）
