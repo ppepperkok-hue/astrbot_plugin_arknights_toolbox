@@ -29,7 +29,7 @@ desc: |-
   私聊任何人都能用（绑定只影响自己）。群聊里只有管理员能操作——在群里绑定会把提醒推给全体成员，所以做了限制。
 
   提醒目标目前只有一个：重新 `/ak bind` 会把它改到新的会话。
-version: 0.3.0
+version: 0.4.0
 author: ppepperkok-hue
 repo: https://github.com/ppepperkok-hue/astrbot_plugin_arknights_toolbox
 astrbot_version: ">=4.17.0"
