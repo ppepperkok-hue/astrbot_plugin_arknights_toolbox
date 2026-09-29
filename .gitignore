@@ -8,9 +8,12 @@ venv/
 .ruff_cache/
 .pytest_cache/
 
-# AstrBot runtime data — never commit
-data/
-config/
+# AstrBot runtime data - never commit
+# Anchored to the repo root on purpose: a bare `data/` also swallowed
+# `modules/<name>/data/*.json` (the recruit module's built-in dataset),
+# which silently kept a required file out of git while tests stayed green.
+/data/
+/config/
 
 # local & editor
 *.log
