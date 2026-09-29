@@ -33,15 +33,15 @@
   "shift_reminder": {
     "type": "object",
     "description": "基建换班提醒模块",
-    "hint": "三段时长必须正好合计 24 小时、并且首尾相接（上一班的结束时刻 = 下一班的开始时刻）。换班提醒在注册定时任务时会按这条校验，不合法会明确报错并拒绝注册，不会静默少排一班。班次名称随你习惯叫。",
+    "hint": "三段时长必须正好合计 24 小时、并且首尾相接（上一班的结束时刻 = 下一班的开始时刻）。换班提醒在注册定时任务时会按这条校验，不合法会明确报错并拒绝注册，不会静默少排一班。班次名默认按位置叫「第 1/2/3 班」——排班表的班次是按位置对应的，用位置名最不容易对错班；想改成「早班」这类叫法也可以，名字只影响显示。",
     "default": {
-      "shift_1_name": "早班",
+      "shift_1_name": "第 1 班",
       "shift_1_start": "08:00",
       "shift_1_hours": 12,
-      "shift_2_name": "晚班",
+      "shift_2_name": "第 2 班",
       "shift_2_start": "20:00",
       "shift_2_hours": 6,
-      "shift_3_name": "夜班",
+      "shift_3_name": "第 3 班",
       "shift_3_start": "02:00",
       "shift_3_hours": 6,
       "lead_minutes": 10,
@@ -51,8 +51,8 @@
       "shift_1_name": {
         "type": "string",
         "description": "第一班名称",
-        "hint": "提醒消息里显示的名字，例如「早班」。",
-        "default": "早班"
+        "hint": "提醒消息里显示的名字，默认「第 1 班」。排班表的班次按位置对应，用位置名最不容易对错班；改成「早班」这类叫法也可以。",
+        "default": "第 1 班"
       },
       "shift_1_start": {
         "type": "string",
@@ -69,8 +69,8 @@
       "shift_2_name": {
         "type": "string",
         "description": "第二班名称",
-        "hint": "提醒消息里显示的名字，例如「晚班」。",
-        "default": "晚班"
+        "hint": "提醒消息里显示的名字，默认「第 2 班」。",
+        "default": "第 2 班"
       },
       "shift_2_start": {
         "type": "string",
@@ -87,8 +87,8 @@
       "shift_3_name": {
         "type": "string",
         "description": "第三班名称",
-        "hint": "提醒消息里显示的名字，例如「夜班」。",
-        "default": "夜班"
+        "hint": "提醒消息里显示的名字，默认「第 3 班」。",
+        "default": "第 3 班"
       },
       "shift_3_start": {
         "type": "string",

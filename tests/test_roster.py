@@ -18,6 +18,7 @@ from modules.shift_reminder.roster import (
     SHIFT_COUNT,
     RosterImportError,
     build_roster,
+    describe_duration_alignment,
     describe_duration_hint,
     describe_roster,
     parse_import_argument,
@@ -631,3 +632,79 @@ def test_describe_duration_hint_distinguishes_an_inconsistent_rhythm() -> None:
 
 def test_describe_duration_hint_handles_missing_roster() -> None:
     assert describe_duration_hint(None)  # 返回一句人话，不抛异常
+
+
+# --- 排班表节奏 vs 当前配置：不一致要说出来（V1.5.6 补） ----------------------
+#
+# 排班表的 `plans` 与配置的 `shift_1/2/3` 是**按位置**对应的。两边节奏不一致时，
+# "第 2 班"在两边指的不是同一班——提醒里会显示另一班的干员，**而且不会报错**。
+# 这组用例钉的是"这种情况必须被说出来，且要指出是哪几班对不上"。
+
+
+def _table_12_6_6() -> dict[str, Any]:
+    """真实 riic.autos 导出的节奏：`Shift 1 · 12h` / `Shift 2 · 6h` / `Shift 3 · 6h`。"""
+    return _roster_named(["Shift 1 · 12h", "Shift 2 · 6h", "Shift 3 · 6h"])
+
+
+def test_alignment_is_silent_when_the_rhythms_match() -> None:
+    """一致时返回**空串**：不该出现「一致（无差异）」这种什么都没说的行。"""
+    assert describe_duration_alignment(_table_12_6_6(), (720, 360, 360)) == ""
+
+
+def test_alignment_names_the_mismatched_shifts() -> None:
+    """不一致时要**指出具体差异**（哪几班对不上、两边各是什么），不能只说「不一致」。"""
+    text = describe_duration_alignment(_table_12_6_6(), (360, 720, 360))
+
+    assert "12 小时" in text and "6 小时" in text, "两边的节奏都要摊出来"
+    assert "第 1 班" in text and "第 2 班" in text, "要指名道姓"
+    assert "第 3 班" not in text, "第 3 班两边都是 6 小时，不该被算作对不上"
+
+
+def test_alignment_names_only_the_positions_that_actually_differ() -> None:
+    """只点名真正对不上的那几班：`6/6/12` 里第 2 班两边都是 6 小时，别牵连它。"""
+    text = describe_duration_alignment(_table_12_6_6(), (360, 360, 720))
+
+    assert "第 1 班" in text and "第 3 班" in text
+    assert "第 2 班" not in text
+
+
+@pytest.mark.parametrize(
+    "configured",
+    [
+        None,
+        (),
+        (720, 360),  # 个数不对
+        (720, 360, 360, 0),  # 个数不对
+        (720, 360, 0),  # 非正
+        (720, 360, -360),
+        (720.5, 359.5, 360),  # 非整数
+        (True, 720, 720),  # 布尔
+        "720,360,360",  # 传成了字符串
+    ],
+)
+def test_alignment_stays_silent_when_it_cannot_compare(configured: Any) -> None:
+    """比较不了就**别说话**：宁可不说，也不要说一句可能误导人的差异。"""
+    assert describe_duration_alignment(_table_12_6_6(), configured) == ""
+
+
+def test_alignment_stays_silent_when_the_table_has_no_rhythm() -> None:
+    """排班表名字里读不出时长（如 `第一班`）时无从比较，安静返回。"""
+    roster = _roster_named(["第一班", "第二班", "第三班"])
+
+    assert describe_duration_alignment(roster, (720, 360, 360)) == ""
+
+
+def test_alignment_is_silent_for_a_missing_roster() -> None:
+    assert describe_duration_alignment(None, (720, 360, 360)) == ""
+
+
+def test_alignment_cannot_detect_a_swap_of_two_equal_duration_shifts() -> None:
+    """**已知局限**：两个时长相同的班次互换位置，这个检查**看不出来**。
+
+    12/6/6 里第 2、3 班都是 6 小时，互换之后时长元组**完全一样**，所以没有任何信号
+    可依据。根因是排班表里的名字（``Shift 2 · 6h``）与配置里的名字（``第 2 班``）
+    **没有对应关系**，不能拿名字去比。
+
+    把它钉成用例而不是留个注释：免得后人以为这个检查是完备的，甚至在它上面继续加逻辑。
+    """
+    assert describe_duration_alignment(_table_12_6_6(), (720, 360, 360)) == ""

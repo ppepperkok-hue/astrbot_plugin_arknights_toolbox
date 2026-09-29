@@ -19,6 +19,7 @@ from core.shifts import (
     current_shift,
     format_hhmm,
     parse_hhmm,
+    parse_shift_slots,
     parse_shift_table,
     reminders_between,
     validate,
@@ -104,6 +105,70 @@ def test_parse_shift_table_reads_the_three_slots() -> None:
     assert [s.name for s in table.shifts] == ["夜班", "早班", "晚班"]
     assert table.start_minutes == (120, 480, 1200)
     assert SHIFT_SLOTS == (1, 2, 3)
+
+
+#: 一份**槽位顺序与时刻顺序刻意相反**的配置：`shift_1` 是 20:00 那班。
+#:
+#: 用它测 `parse_shift_slots` 才有意义——若两者顺序相同，函数有没有保序就看不出差别。
+OUT_OF_TIME_ORDER = {
+    "shift_1_name": "第 1 班",
+    "shift_1_start": "20:00",
+    "shift_1_hours": 6,
+    "shift_2_name": "第 2 班",
+    "shift_2_start": "08:00",
+    "shift_2_hours": 12,
+    "shift_3_name": "第 3 班",
+    "shift_3_start": "02:00",
+    "shift_3_hours": 6,
+}
+
+
+def test_parse_shift_slots_keeps_the_config_order() -> None:
+    """槽位顺序要**原样保留**：这是按 `plans` 下标对齐排班表的唯一依据。
+
+    `parse_shift_table` 会按时刻排序（那份顺序对"现在几点该换班"是对的，
+    对"第 i 班配了多长"是错的），所以两者必须都存在、且分工写清楚。
+    """
+    slots = parse_shift_slots(OUT_OF_TIME_ORDER)
+
+    assert [s.name for s in slots] == ["第 1 班", "第 2 班", "第 3 班"]
+    assert [s.start_minute for s in slots] == [1200, 480, 120]
+    # 对比：同一份配置进 `parse_shift_table` 出来是按时刻排的，顺序确实不同。
+    assert [s.start_minute for s in parse_shift_table(OUT_OF_TIME_ORDER).shifts] == [
+        120,
+        480,
+        1200,
+    ]
+
+
+def test_parse_shift_slots_leaves_whole_table_validation_to_parse_shift_table() -> None:
+    """`parse_shift_slots` 只做逐项校验：**总和不是 24 小时**时它不拦，整表校验才拦。
+
+    这条钉的是分工边界。若哪天有人把 `validate()` 塞进 `parse_shift_slots`，
+    装配层就没法再"先按槽位读、再整表校验"，而两种顺序的用途会重新混起来。
+    """
+    broken = dict(OUT_OF_TIME_ORDER)
+    broken["shift_1_hours"] = 12  # 12 + 12 + 6 = 30 小时
+
+    slots = parse_shift_slots(broken)
+
+    assert [s.duration_minutes for s in slots] == [720, 720, 360]
+    with pytest.raises(ConfigError, match="正好是 24 小时"):
+        parse_shift_table(broken)
+
+
+def test_parse_shift_slots_still_rejects_item_level_errors() -> None:
+    """逐项校验**不能**因为"只做一半"而放松——写坏一项要当场说清是哪一项。"""
+    broken = dict(OUT_OF_TIME_ORDER)
+    broken["shift_2_hours"] = True  # bool 也是 int，必须单独挡
+
+    with pytest.raises(ConfigError, match="shift_2_hours 必须是整数小时数"):
+        parse_shift_slots(broken)
+
+
+def test_parse_shift_table_agrees_with_validating_the_slots() -> None:
+    """两条路是同一套解析：`parse_shift_table` 就是"逐项读 + 整表校验"。"""
+    assert parse_shift_table(OUT_OF_TIME_ORDER) == validate(parse_shift_slots(OUT_OF_TIME_ORDER))
 
 
 @pytest.mark.parametrize(

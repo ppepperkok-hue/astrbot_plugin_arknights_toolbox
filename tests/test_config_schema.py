@@ -123,18 +123,50 @@ def test_default_shifts_form_a_valid_table(module_defaults: dict[str, Any]) -> N
 
 
 def test_default_shifts_match_the_documented_plan(module_defaults: dict[str, Any]) -> None:
-    """默认三班：早班 08:00 / 12h，晚班 20:00 / 6h，夜班 02:00 / 6h。"""
-    assert module_defaults["shift_1_name"] == "早班"
+    """默认三班：第 1 班 08:00 / 12h、第 2 班 20:00 / 6h、第 3 班 02:00 / 6h。
+
+    **名字用位置（「第 N 班」）而不是「早班/晚班/夜班」**：排班表的 ``plans`` 是按
+    位置对应 ``shift_i`` 的，人为标签会随用户作息改变而与实际对不上（见
+    `docs/implementation/implementation.md` §2.6 的本条裁决）。
+    时长顺序 12/6/6 也要一致——那是 riic.autos 导出与 MAA 使用的顺序。
+    """
+    assert module_defaults["shift_1_name"] == "第 1 班"
     assert module_defaults["shift_1_start"] == "08:00"
     assert module_defaults["shift_1_hours"] == 12
 
-    assert module_defaults["shift_2_name"] == "晚班"
+    assert module_defaults["shift_2_name"] == "第 2 班"
     assert module_defaults["shift_2_start"] == "20:00"
     assert module_defaults["shift_2_hours"] == 6
 
-    assert module_defaults["shift_3_name"] == "夜班"
+    assert module_defaults["shift_3_name"] == "第 3 班"
     assert module_defaults["shift_3_start"] == "02:00"
     assert module_defaults["shift_3_hours"] == 6
+
+
+def test_default_shift_names_are_positional_not_human_labels(
+    module_defaults: dict[str, Any],
+) -> None:
+    """默认名里**不许**再出现「早班/晚班/夜班」这类人为标签。
+
+    这条是给后人的护栏：标签看着更亲切，很容易被"顺手改回去"，而它正是
+    所有者这次点名要拿掉的东西——用户一改作息，标签就和实际对不上了。
+    """
+    labels = {"早班", "晚班", "夜班"}
+    names = [module_defaults[f"shift_{slot}_name"] for slot in (1, 2, 3)]
+
+    assert not labels.intersection(names), f"默认名又用回了人为标签：{names}"
+    assert names == ["第 1 班", "第 2 班", "第 3 班"]
+
+
+def test_default_durations_follow_the_schedule_table_order(module_defaults: dict[str, Any]) -> None:
+    """默认时长顺序必须是 12/6/6——与排班表（`Shift 1 · 12h` / `6h` / `6h`）一致。
+
+    顺序不一致的后果不是"显示难看"，而是第 i 班在两边指的不是同一班，
+    提醒里会取到另一班的干员（见 `roster.describe_duration_alignment`）。
+    """
+    hours = [module_defaults[f"shift_{slot}_hours"] for slot in (1, 2, 3)]
+
+    assert hours == [12, 6, 6]
 
 
 def test_validate_rejects_a_five_hour_shift(module_defaults: dict[str, Any]) -> None:

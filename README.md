@@ -37,11 +37,13 @@ git clone https://github.com/ppepperkok-hue/astrbot_plugin_arknights_toolbox.git
 
 | 配置项 | 说明 | 默认 |
 | --- | --- | --- |
-| `shift_1_name` / `shift_1_start` / `shift_1_hours` | 第一班 | 早班 / 08:00 / 12 |
-| `shift_2_name` / `shift_2_start` / `shift_2_hours` | 第二班 | 晚班 / 20:00 / 6 |
-| `shift_3_name` / `shift_3_start` / `shift_3_hours` | 第三班 | 夜班 / 02:00 / 6 |
+| `shift_1_name` / `shift_1_start` / `shift_1_hours` | 第一班 | 第 1 班 / 08:00 / 12 |
+| `shift_2_name` / `shift_2_start` / `shift_2_hours` | 第二班 | 第 2 班 / 20:00 / 6 |
+| `shift_3_name` / `shift_3_start` / `shift_3_hours` | 第三班 | 第 3 班 / 02:00 / 6 |
 | `lead_minutes` | 提前多少分钟提醒 | 10 |
 | `timezone` | 时区（IANA 名称） | `Asia/Shanghai` |
+
+> **班次名为什么用「第 N 班」而不是「早班/晚班」**：你导入的排班表里，班次顺序是按**下标**对应的（`Shift 1` / `Shift 2` / `Shift 3`），而「早/晚/夜」这种标签是人为贴的，**跟排班表没有任何对应关系**——一改作息就会对不上，**而插件仍会照着一个错的名字去取干员**。所以默认用**位置名**，顺序与排班表一致（**12 / 6 / 6**，已是默认）。若你的排班表时长顺序不同，导入时插件会**指名道姓地提示**你哪几班对不上。
 
 > **两个硬性要求**：三段时长之和必须**正好 24 小时**；而且必须**首尾相接**——上一班的开始时刻加上时长，正好等于下一班的开始时刻。
 >

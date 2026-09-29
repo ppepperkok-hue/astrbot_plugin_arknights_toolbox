@@ -282,8 +282,11 @@ class _FakeCronManager:
         return job
 
 
-def _boot(tmp_path, monkeypatch) -> tuple[object, list[tuple]]:
-    """把模块跑起来，返回 (模块, 已注册的 Web API 列表)。"""
+def _boot(tmp_path, monkeypatch, config=None) -> tuple[object, list[tuple]]:
+    """把模块跑起来，返回 (模块, 已注册的 Web API 列表)。
+
+    ``config`` 可换一份班次配置；不传就用模块级的 `CONFIG`（12/6/6）。
+    """
     monkeypatch.setattr(reminder_module, "get_astrbot_plugin_data_path", lambda: str(tmp_path))
     registered: list[tuple] = []
     ctx = SimpleNamespace(
@@ -293,7 +296,7 @@ def _boot(tmp_path, monkeypatch) -> tuple[object, list[tuple]]:
         ),
     )
     instance = reminder_module.ShiftReminderModule()
-    asyncio.run(instance.initialize(ctx, dict(CONFIG)))
+    asyncio.run(instance.initialize(ctx, dict(config or CONFIG)))
     return instance, registered
 
 
@@ -603,6 +606,23 @@ def _schedule_json() -> bytes:
                 },
             }
             for i in (1, 2, 3)
+        ]
+    }
+    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
+def _schedule_json_with_rhythm() -> bytes:
+    """同上，但班次名带时长——真实 riic.autos 导出的写法（`Shift 1 · 12h`）。
+
+    只有这种名字才读得出节奏，也才谈得上"和当前配置比对"。
+    """
+    payload = {
+        "plans": [
+            {
+                "name": name,
+                "rooms": {"trading": [{"operators": ["黑键"], "skip": False}]},
+            }
+            for name in ("Shift 1 · 12h", "Shift 2 · 6h", "Shift 3 · 6h")
         ]
     }
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -931,6 +951,68 @@ def test_web_roster_before_import_shows_not_imported(tmp_path, monkeypatch) -> N
     # 装配层确实把头像映射传下去了（测试环境里数据文件在，所以是 True）。
     assert payload["avatars"]["available"] is True
     assert payload["avatars"]["by_name"] == {}
+
+
+# --- 导入回执要说清「排班表节奏 ≠ 你配的节奏」 -------------------------------
+#
+# 场景来自所有者本人：排班表是 12/6/6，他自己配成 6/12/6。两边"第 2 班"指的不是
+# 同一班，提醒里会显示另一班的干员——**而且不会报错**。所以导入时必须说出来。
+#
+# 出口选 `summary` 而不是新字段：页面的导入回执**只渲染 `result.summary`**
+# （`pages/shift-reminder/app.js`），给一个页面不读的字段等于没做。
+
+#: 节奏与排班表相反：第 1 班 6h、第 2 班 12h、第 3 班 6h（合计仍是 24h，配置合法）。
+CONFIG_SWAPPED_RHYTHM = {
+    "shift_1_name": "第 1 班",
+    "shift_1_start": "20:00",
+    "shift_1_hours": 6,
+    "shift_2_name": "第 2 班",
+    "shift_2_start": "08:00",
+    "shift_2_hours": 12,
+    "shift_3_name": "第 3 班",
+    "shift_3_start": "02:00",
+    "shift_3_hours": 6,
+    "lead_minutes": 10,
+}
+
+
+def test_web_upload_summary_warns_when_the_rhythm_disagrees(tmp_path, monkeypatch) -> None:
+    """配置 6/12/6、排班表 12/6/6 → 回执里必须出现不一致提示，且点得出是哪几班。"""
+    instance, _ = _boot(tmp_path, monkeypatch, config=CONFIG_SWAPPED_RHYTHM)
+    _patch_upload(monkeypatch, _upload_body(_schedule_json_with_rhythm()))
+
+    payload = asyncio.run(instance._web_upload())
+
+    assert payload["saved"] is True, payload
+    summary = payload["summary"]
+    assert "不一致" in summary, summary
+    assert "第 1 班" in summary and "第 2 班" in summary, summary
+
+
+def test_web_upload_summary_stays_quiet_when_the_rhythms_agree(tmp_path, monkeypatch) -> None:
+    """一致的默认配置（12/6/6）不该收到任何提醒——否则用户会去查一个不存在的问题。"""
+    instance, _ = _boot(tmp_path, monkeypatch)
+    _patch_upload(monkeypatch, _upload_body(_schedule_json_with_rhythm()))
+
+    payload = asyncio.run(instance._web_upload())
+
+    assert payload["saved"] is True, payload
+    assert "不一致" not in payload["summary"], payload["summary"]
+
+
+def test_web_upload_never_rewrites_the_shift_config(tmp_path, monkeypatch) -> None:
+    """**导入只给建议，不改配置**——这是本项目反复强调、也反复被测试钉住的一条。
+
+    用「上传前后模块持有的槽位时长一字未变」来验：这是装配层唯一一份"当前配置"的副本。
+    """
+    instance, _ = _boot(tmp_path, monkeypatch, config=CONFIG_SWAPPED_RHYTHM)
+    before = instance._configured_minutes
+    _patch_upload(monkeypatch, _upload_body(_schedule_json_with_rhythm()))
+
+    asyncio.run(instance._web_upload())
+
+    assert instance._configured_minutes == before
+    assert instance._configured_minutes == (360, 720, 360)
 
 
 # --- 页面默认选中「当前班次」 --------------------------------------------------

@@ -29,6 +29,7 @@ try:  # pragma: no cover - 走哪支取决于运行场景，两支都是真实�
         SHIFT_SLOTS,
         ConfigError,
         ShiftTable,
+        parse_shift_slots,
         parse_shift_table,
     )
     from core.storage import JsonlSendLog, JsonStateStore, SendRecord
@@ -39,6 +40,7 @@ except ImportError:  # pragma: no cover
         SHIFT_SLOTS,
         ConfigError,
         ShiftTable,
+        parse_shift_slots,
         parse_shift_table,
     )
     from ...core.storage import JsonlSendLog, JsonStateStore, SendRecord
@@ -210,6 +212,11 @@ class ShiftReminderModule(Module):
         # 三班的**原始顺序**（第1/2/3班）：排班表的 plans 按这个顺序对应，
         # 不能用 ShiftTable.shifts 的顺序（那个按开始时刻排过）。
         self._shift_order: tuple[str, ...] = ()
+        # 三班的时长，**槽位顺序**的分钟数（`shift_1/2/3_hours` → 分钟）。用来在导入
+        # 排班表时比对「表里的节奏」与「你配的节奏」是否一致——不一致就说明第 i 班在
+        # 两边指的不是同一班，提醒会取错另一班的干员（见 roster.describe_duration_alignment）。
+        # 必须来自 `parse_shift_slots`（保留槽位顺序），`ShiftTable.shifts` 是按时刻排过的。
+        self._configured_minutes: tuple[int, ...] = ()
         # `/ak import` 只认这个目录里的文件；由 initialize 填好（见 resolve_import_path）。
         self._data_dir: Path | None = None
         # 干员头像映射（中文名 → 外链 URL）。装载失败时为 None，页面退回首字色块——
@@ -221,6 +228,7 @@ class ShiftReminderModule(Module):
     async def initialize(self, ctx: Any, config: Mapping[str, Any]) -> None:
         table = parse_shift_table(config)
         shift_order = parse_shift_order(config)
+        slot_minutes = tuple(shift.duration_minutes for shift in parse_shift_slots(config))
         lead_minutes = parse_lead_minutes(config)
         timezone = parse_timezone(config)
 
@@ -239,6 +247,7 @@ class ShiftReminderModule(Module):
         self._tz = _load_timezone(timezone)
         self._strategy = PeriodStrategy(table, lead_minutes)
         self._shift_order = shift_order
+        self._configured_minutes = slot_minutes
         self._data_dir = data_dir
         self._store = JsonStateStore(data_dir / "state.json")
         self._send_log = JsonlSendLog(data_dir / "sends.jsonl", keep=SEND_LOG_KEEP)
@@ -332,6 +341,7 @@ class ShiftReminderModule(Module):
 
         table = parse_shift_table(config)
         shift_order = parse_shift_order(config)
+        slot_minutes = tuple(shift.duration_minutes for shift in parse_shift_slots(config))
         lead_minutes = parse_lead_minutes(config)
         timezone = parse_timezone(config)
 
@@ -339,6 +349,7 @@ class ShiftReminderModule(Module):
         self._tz = _load_timezone(timezone)
         self._strategy = PeriodStrategy(table, lead_minutes)
         self._shift_order = shift_order
+        self._configured_minutes = slot_minutes
         await self._register_jobs(cron_manager, table, lead_minutes, timezone)
 
     async def _purge_stale_jobs(self, cron_manager: Any) -> int:
@@ -630,6 +641,16 @@ class ShiftReminderModule(Module):
         )
         await self._reply(event, f"{body}\n绑定目标：{binding}\n推送状态：{breaker}")
 
+    def _alignment_note(self, imported: Mapping[str, Any]) -> str:
+        """排班表节奏与当前配置不一致时的一句提示；一致/读不出时为**空串**。
+
+        调用方按"有话说才说"拼接：一致时不该出现一行"一致（无差异）"——
+        那每个字都对，却什么都没告诉用户。
+        """
+        if not self._configured_minutes:
+            return ""
+        return roster.describe_duration_alignment(imported, self._configured_minutes)
+
     async def _cmd_import(self, event: Any) -> None:
         """``/ak import <文件名>``：把数据目录下的排班表读进来并落盘。
 
@@ -686,6 +707,7 @@ class ShiftReminderModule(Module):
             event,
             f"{roster.describe_roster(imported)}\n"
             f"{roster.describe_duration_hint(imported)}\n"
+            f"{self._alignment_note(imported)}\n"
             f"来源：{path.name}",
         )
 
@@ -872,12 +894,19 @@ class ShiftReminderModule(Module):
             imported.get("shift_count", 0),
             shown or "(未提供)",
         )
+        # 「表里的节奏 ≠ 你配的节奏」这条提示拼进 `summary`，因为页面在导入回执里
+        # **只渲染 summary**（`pages/shift-reminder/app.js` 读 `result.summary`）。
+        # 另起一个页面没读的字段等于没做——宁可复用既有出口。
+        summary = roster.describe_roster(imported)
+        alignment = self._alignment_note(imported)
+        if alignment:
+            summary = f"{summary}\n{alignment}"
         return json_response(
             {
                 "saved": True,
                 "filename": UPLOAD_FILENAME,
                 # 与 /ak import 的回执同口径，用户两处看到的数字一致。
-                "summary": roster.describe_roster(imported),
+                "summary": summary,
                 # 能不能从名字里读出班次时长——页面据此显示「按排班表填入」按钮。
                 "duration_hint": roster.describe_duration_hint(imported),
                 "duration_hints_minutes": (

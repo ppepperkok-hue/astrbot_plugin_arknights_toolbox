@@ -24,6 +24,7 @@ __all__ = [
     "SHIFT_COUNT",
     "RosterImportError",
     "build_roster",
+    "describe_duration_alignment",
     "describe_duration_hint",
     "describe_roster",
     "parse_import_argument",
@@ -341,6 +342,56 @@ def describe_duration_hint(roster: Mapping[str, Any] | None) -> str:
         )
     return (
         f"从名字里读出了节奏：{rhythm}。想用它在页面上点「按排班表填入」即可，不点就不动你的设置。"
+    )
+
+
+def describe_duration_alignment(
+    roster: Mapping[str, Any] | None,
+    configured_minutes: Sequence[int] | None,
+) -> str:
+    """比对「排班表的节奏」与「用户当前配置的时长」，不一致时给一句**指得出差异**的话。
+
+    为什么需要它：排班表的 ``plans`` 与配置的 ``shift_1/2/3`` 是**按位置**对应的
+    （见 :func:`build_roster`），而两边各写各的时长。用户把顺序配成 6/12/6、而表是
+    12/6/6 时，"第 2 班"在两边指的不是同一班——**提醒里显示的房间与干员会取自另一班，
+    而且整个过程不会报错**（与本模块修过的那个班次顺序缺陷同一类）。所以导入时就要说出来。
+
+    Args:
+        roster: `build_roster` 的产物，或 None。
+        configured_minutes: 配置里 ``shift_1/2/3_hours`` 换算出的分钟数，**必须是槽位顺序**
+            （装配层从 `core.shifts.parse_shift_slots` 取；不能用按开始时刻排序后的表，
+            那份顺序与 ``plans`` 下标不对应）。
+
+    Returns:
+        不一致时一行提示；**一致、读不出时长、或无法比较时返回空串**——调用方按"有话说才说"
+        拼接，避免出现"一致（无差异）"这种每个字都对、却什么都没告诉用户的废话。
+    """
+    table_minutes = suggested_durations(roster)
+    if table_minutes is None or configured_minutes is None:
+        return ""
+    if isinstance(configured_minutes, (str, bytes)) or len(configured_minutes) != SHIFT_COUNT:
+        return ""
+
+    configured: list[int] = []
+    for item in configured_minutes:
+        if not isinstance(item, int) or isinstance(item, bool) or item <= 0:
+            return ""
+        configured.append(item)
+
+    if tuple(configured) == table_minutes:
+        return ""
+
+    table_rhythm = " / ".join(_format_minutes(value) for value in table_minutes)
+    own_rhythm = " / ".join(_format_minutes(value) for value in configured)
+    mismatched = [
+        f"第 {index + 1} 班"
+        for index in range(SHIFT_COUNT)
+        if configured[index] != table_minutes[index]
+    ]
+    return (
+        f"⚠️ 你的班次时长与排班表不一致：排班表是 {table_rhythm}，你配的是 {own_rhythm}"
+        f"（{'、'.join(mismatched)} 对不上）。此时提醒里显示的房间与干员可能取自另一班——"
+        "可在页面上点「按排班表填入」对齐，本项目不会自动改你的设置。"
     )
 
 

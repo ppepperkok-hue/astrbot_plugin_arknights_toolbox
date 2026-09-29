@@ -165,16 +165,19 @@ def reminders_between(
     return pairs
 
 
-def parse_shift_table(config: Mapping[str, Any]) -> ShiftTable:
-    """把扁平配置键组装成**已校验**的班次表。
+def parse_shift_slots(config: Mapping[str, Any]) -> tuple[Shift, ...]:
+    """按**配置槽位顺序**读出三班（``shift_1`` → ``shift_2`` → ``shift_3``）。
 
-    原先住在 `modules/shift_reminder/module.py` 的装配层里。移到这里的原因：
-    "从配置里读出三班"是共享概念的一部分——任何要按班次做事的模块都得用**同一套**
-    解析与校验，否则两边对"什么叫合法配置"的判断会分叉（而分叉的代价是
-    `maa` 在错误时刻询问，见模块 docstring）。
+    与 :func:`parse_shift_table` 只差两点：**保留槽位顺序**，且**只做逐项类型校验**、
+    不做整表校验（总时长、首尾相接、名称唯一）。要一份"已经能直接用"的表用后者。
 
-    配置非法一律抛 `ConfigError`——加载失败要让人当场看见，不静默降级
-    （项目宪法 §2 第 2 条）。
+    为什么需要它：排班表的 ``plans`` 是**按下标**对应 ``shift_i`` 的（见
+    `modules/shift_reminder/roster.py` 的 ``build_roster``——文件里的班次名五花八门，
+    只有位置是稳定身份）。而 :func:`parse_shift_table` 返回的表**按开始时刻排过序**，
+    拿它去对齐 ``plans`` 会张冠李戴："第 i 班配了多长"这件事**只在槽位顺序下**说得准。
+
+    Raises:
+        ConfigError: 某个槽位缺项、类型不对或时刻格式非法。
     """
     shifts: list[Shift] = []
     for slot in SHIFT_SLOTS:
@@ -195,4 +198,22 @@ def parse_shift_table(config: Mapping[str, Any]) -> ShiftTable:
                 duration_minutes=hours * 60,
             )
         )
-    return validate(shifts)
+    return tuple(shifts)
+
+
+def parse_shift_table(config: Mapping[str, Any]) -> ShiftTable:
+    """把扁平配置键组装成**已校验**的班次表。
+
+    原先住在 `modules/shift_reminder/module.py` 的装配层里。移到这里的原因：
+    "从配置里读出三班"是共享概念的一部分——任何要按班次做事的模块都得用**同一套**
+    解析与校验，否则两边对"什么叫合法配置"的判断会分叉（而分叉的代价是
+    `maa` 在错误时刻询问，见模块 docstring）。
+
+    配置非法一律抛 `ConfigError`——加载失败要让人当场看见，不静默降级
+    （项目宪法 §2 第 2 条）。
+
+    Note:
+        返回的表**按开始时刻升序**（`:func:`validate`` 排的）。要**槽位顺序**的原始
+        三班（例如按 ``plans`` 下标对齐排班表），用 :func:`parse_shift_slots`。
+    """
+    return validate(parse_shift_slots(config))
