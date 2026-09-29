@@ -249,19 +249,88 @@ def _message_of(payload: Any, fallback: str) -> str:
     return fallback
 
 
+def _content_type_label(value: Any) -> str:
+    """媒体类型可以安全展示——它是协议常量，不是凭据；其它头一律只报名字。
+
+    `Content-Type` **缺失**时要明说是缺失，并点出 `urllib` 会替我们补什么：
+    那个自动补的默认值正是第 3 步事故的成因，把它藏起来等于把线索藏起来。
+    """
+    if not isinstance(value, str) or not value.strip():
+        return "<未设置（urllib 会替我们补 application/x-www-form-urlencoded）>"
+    text = value.strip()
+    main, _, sub = text.partition("/")
+    if main.isalpha() and sub and all(char.isalnum() or char in ".+-" for char in sub):
+        return text
+    return "<非标准媒体类型，已隐去>"
+
+
+def describe_request_shape(body: Any = None, *, content_type: Any = None) -> str:
+    """请求体的**形状**：键名、类型、长度——**绝不含任何值**。
+
+    为什么需要它：线上第 3 步失败时，服务端只说 `scanCode` 的 `required` 校验没过。
+    光看那句话**无法区分**「我们压根没发这个字段」与「发了，但服务端没把它当 JSON 读」。
+    形状能区分：它会显示 `scanCode=str(len=120)`，方向立刻从"值不对"转到"传输不对"。
+    这次的真因（`Content-Type` 被 `urllib` 默认成表单）就是这样被定位的。
+
+    **凭据红线照旧**：只给键名、类型与长度；任何值都不出现，截断的也不行。
+    """
+    parts: list[str] = [f"Content-Type={_content_type_label(content_type)}"]
+    if body is None:
+        parts.append("请求体=无")
+        return "；".join(parts)
+    if not isinstance(body, Mapping):
+        parts.append(f"请求体={type(body).__name__}（非对象）")
+        return "；".join(parts)
+
+    fields: list[str] = []
+    for key, value in body.items():
+        name = str(key)
+        if isinstance(value, str):
+            fields.append(f"{name}=str(len={len(value)})")
+        elif isinstance(value, bool):
+            fields.append(f"{name}=bool")
+        elif isinstance(value, (int, float)):
+            fields.append(f"{name}={type(value).__name__}")
+        elif isinstance(value, Mapping):
+            fields.append(f"{name}=对象{{{len(value)} 键}}")
+        elif isinstance(value, (list, tuple)):
+            fields.append(f"{name}=列表(len={len(value)})")
+        else:
+            fields.append(f"{name}={type(value).__name__}")
+    parts.append("请求体={" + "、".join(fields) + "}" if fields else "请求体={}（空对象）")
+    return "；".join(parts)
+
+
+@dataclass(frozen=True)
+class RawResult:
+    """`_call_raw` 的结果：**响应**加上**我们实际发出的请求形状**。
+
+    两样一起带回，是为了让上层（第 3 步那样的多步流程）在失败时能同时说出
+    「服务端说了什么」与「我们发了什么形状」——只报一样，排查就会被引向错误方向。
+    """
+
+    payload: Any
+    http_status: int
+    request_shape: str
+
+
 @dataclass(frozen=True)
 class RawCall:
     """一次未签名调用的原始结果——给扫码链路做排查用。
 
-    只带**服务端回了什么**，不带**我们发了什么**：第 3 步的请求体里就是 `scanCode`，
-    绝不能让任何"方便排查"的设计把它带出去。`path` 也刻意**不含 query**——轮询的
-    query 里就是 `scanId`，同样算登录票据。
+    只带**服务端回了什么**与**请求的*形状***，不带任何请求里的**值**：第 3 步的请求体
+    里就是 `scanCode`，绝不能让任何"方便排查"的设计把它带出去。`path` 也刻意**不含
+    query**——轮询的 query 里就是 `scanId`，同样算登录票据。
+
+    `request_shape` 之所以可以留下：键名、类型、长度都不是凭据；而它恰恰能证明
+    「我们发了非空的值」还是「我们什么都没发」——那是纯响应摘要永远给不出的信息。
     """
 
     payload: Any
     http_status: int
     method: str
     path: str
+    request_shape: str = "请求体=无"
 
 
 class SklandClient:
@@ -297,16 +366,17 @@ class SklandClient:
     # --- 传输 ---------------------------------------------------------------
 
     def _call(self, method: str, url: str, *, body: Any = None, signed: bool = True) -> Any:
-        payload, _ = self._call_raw(method, url, body=body, signed=signed)
-        return payload
+        return self._call_raw(method, url, body=body, signed=signed).payload
 
     def _call_raw(
         self, method: str, url: str, *, body: Any = None, signed: bool = True
-    ) -> tuple[Any, int]:
-        """发一次请求，返回 `(已解析响应体, HTTP 状态码)`。
+    ) -> RawResult:
+        """发一次请求，返回 :class:`RawResult`（响应 + HTTP 状态 + 请求形状）。
 
         为什么要单独把状态码带出来：扫码链路的失败只报「响应里没有 data」，
         **没有 HTTP 状态就无法区分「服务端拒绝」与「网关改写了响应」**。
+        为什么还要带**请求形状**：只报服务端说了什么，会把「我们没发」与
+        「发了但没被当 JSON 读」混成同一句话——第 3 步那次就是这个混同。
         """
         self.cache.check_cooldown(urllib.parse.urlsplit(url).path)
 
@@ -314,6 +384,20 @@ class SklandClient:
             None if body is None else json.dumps(body, separators=(",", ":")).encode("utf-8")
         )
         headers: dict[str, str] = {"User-Agent": HONEST_USER_AGENT}
+        if payload_bytes is not None or signed:
+            # 两条并列的理由，**都不能省**：
+            #
+            # ① 带 body 的请求必须声明 JSON。这里踩过一个只有真机才现形的坑：
+            #    `urllib` 在带 body 却没有显式 `Content-Type` 时会补上
+            #    `application/x-www-form-urlencoded`（实测，见 tmp/s6_probe_content_type.py），
+            #    于是服务端按**表单**绑定，body 里明明是正确的 JSON 也一个字段都读不到。
+            #    表现是第 3 步 400：`Field validation for 'scanCode' failed on the
+            #    'required' tag` —— 字段名对、值却是空的，因为那份 body 从未被
+            #    当作 JSON 解析过。**原先这个头只设在签名分支里，未签名分支没有**，
+            #    两条路径的这次漂移就是本 bug 的成因。
+            # ② 签名请求（含不带 body 的 POST，例如签到）也声明 JSON：那是本客户端
+            #    一贯的协议立场，改掉它属于顺手改行为，不在本次修复范围内。
+            headers["Content-Type"] = "application/json"
         if signed:
             if not self.has_credentials:
                 raise SklandUnauthorized("还没有授权，先扫码")
@@ -330,8 +414,12 @@ class SklandClient:
                     cred=self._cred, token=self._token, path=path, query_or_body=signed_part
                 )
             )
-            headers["Content-Type"] = "application/json"
+            # 刻意不在这里再设 Content-Type：上面按「有没有 body」统一设过一次。
+            # 同一件事只留一处实现，免得两条路径再次漂移——那个漂移就是本 bug 的成因。
 
+        # 形状在这里定稿：**必须在 `_transport` 之前、且在签名头补完之后**取，
+        # 否则记下的是"我们打算发的"，而不是"实际交出去的"——两者之差就是本 bug。
+        request_shape = describe_request_shape(body, content_type=headers.get("Content-Type"))
         response = self._transport(method, url, headers, payload_bytes)
         try:
             payload = json.loads(response.body.decode("utf-8"))
@@ -345,9 +433,9 @@ class SklandClient:
         if code is None:
             # 通行证侧（hypergryph）用 status 字段而不是 code，所以只有在带了 code
             # 的接口上才要求它存在。这里不猜——交给调用方按各自协议判。
-            return payload, response.status
+            return RawResult(payload, response.status, request_shape)
         if code == CODE_SUCCESS:
-            return payload, response.status
+            return RawResult(payload, response.status, request_shape)
         message = _message_of(payload, f"接口返回 code={code}")
         detail = f"（HTTP {response.status}，code={code}）"
         if code == CODE_BAD_CRED:
@@ -395,12 +483,13 @@ class SklandClient:
         扫码链路改用它：只报「响应里没有 data」而不报状态码，等于把最便宜的一条线索
         丢掉。返回值里**不含请求体**——见 :class:`RawCall`。
         """
-        payload, status = self._call_raw(method, url, body=body, signed=False)
+        result = self._call_raw(method, url, body=body, signed=False)
         return RawCall(
-            payload=payload,
-            http_status=status,
+            payload=result.payload,
+            http_status=result.http_status,
             method=method,
             path=urllib.parse.urlsplit(url).path,
+            request_shape=result.request_shape,
         )
 
     def health_check(self) -> dict[str, Any]:

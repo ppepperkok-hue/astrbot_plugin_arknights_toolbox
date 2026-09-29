@@ -342,16 +342,24 @@ def step_failure(
     payload: Any = None,
     *,
     http_status: int | None = None,
+    request_shape: str = "",
 ) -> ScanLoginError:
     """构造一个**带步骤与响应摘要**的失败。
 
     回执与日志都用它的 `str()`，所以这一段文案同时要满足两个读者：用户想知道
     「我该做什么」，我们想知道「哪一步、服务端回了什么」。
+
+    `request_shape` 是**请求侧的形状**（键名/类型/长度，绝无值）。加它是因为
+    只有响应摘要时，「服务端说某字段是空的」这句话有**两种完全不同的解释**：
+    我们没发那个字段，或者发了但对方没按 JSON 读。第 3 步线上那次就是后者，
+    而光看响应摘要永远分不出来。
     """
     detail = describe_response(payload, http_status=http_status)
     message = f"{step.label} 失败：{reason}"
     if detail:
         message += f"｜服务端：{detail}"
+    if request_shape:
+        message += f"｜我方请求：{request_shape}"
     return ScanLoginError(
         message,
         step=step,

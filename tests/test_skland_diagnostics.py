@@ -777,3 +777,137 @@ def test_expired_state_reaches_the_user_with_a_resend_hint(
     joined = "\n".join(ctx.sent)
     assert "失效" in joined
     assert "/ak skland login" in joined
+
+
+# --- 六、Content-Type：第 3 步「字段是空的」事故的护栏 ------------------------
+
+
+class _JsonBindingServer:
+    """模拟**只认 `Content-Type: application/json`** 的服务端。
+
+    线上服务端就是这个行为：头部不是 JSON 时它按**表单**绑定，body 里明明是正确
+    的 JSON 也一个字段都读不到，于是回报
+    `Field validation for 'scanCode' failed on the 'required' tag`——
+    **字段名对、值却是空的**。
+
+    把这个真实行为写进假传输，是这次事故唯一能变成回归测试的办法：没有它，
+    这个缺陷只有在真机上扫码才现形（而它已经在真机上耗掉了一个晚上）。
+    """
+
+    #: 线上原样（HTTP 400，只有一个 `msg`；字段路径前缀是服务端的结构名）。
+    #: 那 18 个字符会被 `login.scrub` 的「长串一律隐去」规则遮掉，变成
+    #: `<已隐去 len=18>` —— 遮得比必要的多，但**方向是安全的**，故保留。
+    REQUIRED_MSG = (
+        "Key: 'token_by_scan_code.scanCode' Error:Field validation for "
+        "'scanCode' failed on the 'required' tag"
+    )
+
+    #: 我们**自己**发出的头部里不该出现的那个值（urllib 替我们补的默认值）。
+    URLLIB_FORM_DEFAULT = "application/x-www-form-urlencoded"
+
+    def __init__(self) -> None:
+        self.headers_seen: list[dict[str, str]] = []
+
+    def __call__(
+        self, method: str, url: str, headers: Mapping[str, str], body: bytes | None
+    ) -> api.HttpResponse:
+        self.headers_seen.append(dict(headers))
+        # 表单绑定的服务端读不到 JSON 里的字段 —— 与线上报错逐字一致。
+        if headers.get("Content-Type") != "application/json":
+            return _response({"msg": self.REQUIRED_MSG}, 400)
+        return _StepTransport._healthy(url)
+
+
+def test_unsigned_post_declares_json_content_type() -> None:
+    """**本包的核心护栏**：未签名 POST 也必须声明 JSON。
+
+    原先这个头只设在签名分支里，未签名分支没有。`urllib` 于是替我们补上
+    `application/x-www-form-urlencoded`（实测），服务端按表单绑定 → 第 3 步必失败。
+    这条断言直接钉住那个头，是本缺陷最便宜的一道防线。
+    """
+    server = _JsonBindingServer()
+    client = api.SklandClient(transport=server)
+    client.call_unauthenticated_detailed(
+        "POST",
+        f"{api.HYPERGRYPH_BASE}/user/auth/v1/token_by_scan_code",
+        login.token_request(SCAN_CODE),
+    )
+    assert server.headers_seen[0].get("Content-Type") == "application/json"
+
+
+def test_login_completes_against_a_server_that_only_binds_json(
+    data_root: Path, recorded: _RecordingLogger
+) -> None:
+    """端到端：服务端只认 JSON 时，整条授权链路必须能走完。
+
+    这是**可证伪**的那一条——把 `Content-Type` 那行改回去（只设在签名分支），
+    服务端就会回 400，本测试随即变红。第 3 步在真机上坏了整晚，本地却全绿，
+    缺的就是这条。
+    """
+    module, ctx = _module_with(_JsonBindingServer(), data_root)
+    asyncio.run(module._complete_login("test:FriendMessage:1", SCAN_CODE))
+
+    joined = "\n".join(ctx.sent)
+    assert "授权成功" in joined, f"授权没有走完：{joined}"
+    assert "失败" not in joined, f"不该出现失败字样：{joined}"
+    assert module._store is not None and module._store.load() is not None
+
+
+def test_step_three_failure_reports_our_request_shape_without_values(
+    data_root: Path, recorded: _RecordingLogger
+) -> None:
+    """失败文案要同时带上**服务端说了什么**与**我们发了什么形状**。
+
+    只有前者时，「服务端说某字段是空的」有两种完全相反的解释：我们没发，
+    或者发了但对方没按 JSON 读。形状（`scanCode=str(len=…)`）能当场把两者分开。
+    """
+    transport = _StepTransport(login.STEP_TOKEN, {"msg": _JsonBindingServer.REQUIRED_MSG}, 400)
+    module, ctx = _module_with(transport, data_root)
+    asyncio.run(module._complete_login("test:FriendMessage:1", SCAN_CODE))
+
+    output = recorded.joined + "\n" + "\n".join(ctx.sent)
+
+    assert "第 3 步" in output
+    assert "HTTP 400" in output
+    assert "我方请求" in output, f"没有带上请求形状：{output}"
+    # 关键：证明我们**确实发了非空的 scanCode**（长度而不是值）
+    assert f"scanCode=str(len={len(SCAN_CODE)})" in output, f"请求形状不含 scanCode：{output}"
+    assert "Content-Type=application/json" in output, f"请求形状不含 Content-Type：{output}"
+    _assert_no_leak(output)
+
+
+def test_request_shape_never_renders_a_value() -> None:
+    """形状描述器**只给键名、类型与长度**——值一个字都不给，截断也不行。"""
+    shape = api.describe_request_shape(
+        {
+            "scanCode": SCAN_CODE,
+            "token": PASSPORT_TOKEN,
+            "kind": 1,
+            "nested": {"cred": CRED_VALUE},
+            "items": [1, 2, 3],
+            "flag": True,
+        },
+        content_type="application/json",
+    )
+    assert f"scanCode=str(len={len(SCAN_CODE)})" in shape
+    assert f"token=str(len={len(PASSPORT_TOKEN)})" in shape
+    assert "kind=int" in shape
+    assert "nested=对象{1 键}" in shape
+    assert "items=列表(len=3)" in shape
+    assert "flag=bool" in shape
+    _assert_no_leak(shape)
+
+
+def test_a_missing_content_type_is_named_as_the_trap_it_is() -> None:
+    """`Content-Type` 缺失时，描述器要**点出 urllib 会替我们补什么**。
+
+    这条不是为了好看：那个自动补的默认值正是本事故的成因，把它写成一句无声的
+    「未设置」，等于把线索藏起来——下次再遇到同样的症状还得从头查一遍。
+    """
+    shape = api.describe_request_shape({"scanCode": SCAN_CODE}, content_type=None)
+    assert "未设置" in shape
+    assert _JsonBindingServer.URLLIB_FORM_DEFAULT in shape
+
+    supplied = api.describe_request_shape({"scanCode": SCAN_CODE}, content_type="application/json")
+    assert "Content-Type=application/json" in supplied
+    assert _JsonBindingServer.URLLIB_FORM_DEFAULT not in supplied

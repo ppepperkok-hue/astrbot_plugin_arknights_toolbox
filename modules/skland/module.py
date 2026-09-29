@@ -454,8 +454,14 @@ class SklandModule(Module):
         except login.ScanLoginError as exc:
             # 用 `reason` 而不是 `str(exc)`：解析器自己已经带过步骤前缀了，
             # 直接拼接会套娃（「第 3 步 失败：第 3 步 失败：…」）。
+            # 同时带上**请求形状**（键名/类型/长度，无值）：服务端说"某字段是空的"
+            # 时，只有形状能区分「我们没发」与「发了但没被当 JSON 读」。
             raise login.step_failure(
-                step, exc.reason or str(exc), raw.payload, http_status=raw.http_status
+                step,
+                exc.reason or str(exc),
+                raw.payload,
+                http_status=raw.http_status,
+                request_shape=raw.request_shape,
             ) from exc
 
     async def _poll_scan(self, event: Any, scan_id: str, umo: str) -> None:
