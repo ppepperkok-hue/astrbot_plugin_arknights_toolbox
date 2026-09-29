@@ -307,3 +307,41 @@ D:\mrfzmma\MAA.dll      ProductVersion = v6.18.0+23feeddc...
 - 项目内既有调研：`docs/project-plan/02-integration-research.md`（§2 H1–H4、§6 执行端、§4.2 许可红线、§6.5 B1/B2、R1、P1–P4）
 
 **没有做的事**（刻意）：未修改任何 MAA 配置；未启动 MAA；未请求任何 MAA 端点；未复制 MAA 代码或资源；未在服务器上新建任何端点。
+
+## §附 最小可验证端点落地后补记（2026-09-29）
+
+上一节建议的「先做最小可验证版本」已经落地：`modules/maa/` 提供两个端点，恒回空任务表 / 只记日志，
+默认关闭。落地过程中查出**一件决定这一步能否成立的事实**，记在这里以免下一个人重查。
+
+### 端点能匿名到达吗？——**不能，但可以带查询串的 API Key**
+
+实测（容器内读 AstrBot 4.28.1 源码）：
+
+- 插件用 `register_web_api` 注册的路由，挂在
+  `/api/v1/plugins/extensions/<插件名>/<路由>`，**每一个 HTTP 方法都带
+  `Depends(require_plugin_scope)`** —— 即**需要面板认证**。
+  （今晚早先的探测也印证过：不带 key 打过去是 401，不是 404。）
+- 但 `dashboard/api/auth.py:_extract_raw_api_key` **接受四种形态**：
+  `Authorization: Bearer <key>`、`?api_key=<key>`、`?key=<key>`、`X-API-Key`。
+
+⇒ **MAA 只能填一个普通 URL、没法带自定义请求头，所以「查询串」是它唯一能携带凭据的形态。**
+本模块据此在文案里写明：两个 URL 都要带 `?api_key=<面板 API Key>`。
+
+**安全边界（必须写清）**：这个端点是**匿名可达**的（任何人拿到 URL 都能 POST）。
+因此：
+
+- 领任务端点的响应是**常量** `{"tasks": []}`，**不读请求里的任何字段**——
+  「结构上不可能被用来执行外部指令」这件事有测试钉着
+  （`tests/test_maa_module.py::test_get_task_response_does_not_depend_on_the_request`）。
+- **将来加真实任务时，这里是最危险的一处代码**：必须先有真正的身份校验
+  （按请求体里的标识去查我们**预先登记过**的设备），**绝不能**靠请求体里自报的
+  `user` / `device` 判断归属——那是攻击者可以随便填的字段。警告写在
+  `MaaModule._web_get_task` 的 docstring 里。
+
+### 仍未验证（本步骤存在的理由）
+
+1. **MAA（.NET）认不认服务器的自签证书** —— 只能由用户真机试；这是第一风险。
+2. 用户侧 MAA 的实际轮询行为（间隔、重试、UA 形态）。
+3. `?api_key=` 在**公网 443 → nginx → Dashboard** 这条链路上是否原样透传
+   （查询串通常会被保留，但未经实测）。
+
