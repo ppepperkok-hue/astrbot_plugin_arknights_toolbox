@@ -1,4 +1,4 @@
-/* 基建换班提醒 —— 只读状态页。
+/* 基建换班提醒 —— 状态 + 班次时间轴。
    样式克制、跟随系统深浅色；刻意不引任何外部 CDN（离线环境也能用）。 */
 
 :root {
@@ -9,6 +9,10 @@
   --card: #ffffff;
   --line: #e3e6ea;
   --bad: #b42318;
+  --shift-1: #3b82f6;
+  --shift-2: #f59e0b;
+  --shift-3: #8b5cf6;
+  --handle: #ffffff;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -19,6 +23,10 @@
     --card: #1f2227;
     --line: #2c3037;
     --bad: #ff8a80;
+    --shift-1: #2563eb;
+    --shift-2: #b45309;
+    --shift-3: #6d28d9;
+    --handle: #f8fafc;
   }
 }
 
@@ -75,6 +83,16 @@ button {
 button:disabled {
   opacity: 0.6;
   cursor: progress;
+}
+
+button.ghost {
+  padding: 4px 10px;
+  color: var(--muted);
+}
+
+button.small {
+  padding: 2px 8px;
+  font-size: 12px;
 }
 
 .cards {
@@ -149,4 +167,200 @@ code {
   background: rgba(127, 127, 127, 0.16);
   padding: 1px 5px;
   border-radius: 4px;
+}
+
+/* ---- 时间轴 ------------------------------------------------------------- */
+
+.timeline {
+  position: relative;
+  height: 84px;
+  margin: 14px 0 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: rgba(127, 127, 127, 0.08);
+  overflow: hidden;
+  touch-action: none; /* 触屏拖动时不要触发页面滚动 */
+  user-select: none;
+}
+
+.tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(127, 127, 127, 0.25);
+  pointer-events: none;
+}
+
+.tick span {
+  position: absolute;
+  top: 2px;
+  left: 3px;
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.bar {
+  position: absolute;
+  top: 16px;
+  bottom: 6px;
+  border-radius: 6px;
+  color: #ffffff;
+  padding: 5px 8px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: grab;
+  touch-action: none;
+}
+
+.bar:active {
+  cursor: grabbing;
+}
+
+.bar-0 {
+  background: var(--shift-1);
+}
+
+.bar-1 {
+  background: var(--shift-2);
+}
+
+.bar-2 {
+  background: var(--shift-3);
+}
+
+.bar-title {
+  font-weight: 600;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bar-meta {
+  font-size: 11px;
+  opacity: 0.92;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+
+.handle {
+  position: absolute;
+  top: 12px;
+  bottom: 2px;
+  width: 18px;
+  margin-left: -9px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: ew-resize;
+  touch-action: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.handle::after {
+  content: "";
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--handle);
+  border: 2px solid rgba(0, 0, 0, 0.35);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.handle:focus-visible::after {
+  outline: 2px solid var(--shift-1);
+  outline-offset: 2px;
+}
+
+.timeline-hint {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- 编辑行 ------------------------------------------------------------- */
+
+.editors {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.editor {
+  display: grid;
+  grid-template-columns: 12px minmax(90px, 1fr) auto auto auto auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.editor .mono {
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.dot-0 {
+  background: var(--shift-1);
+}
+
+.dot-1 {
+  background: var(--shift-2);
+}
+
+.dot-2 {
+  background: var(--shift-3);
+}
+
+input[type="text"],
+input[type="number"] {
+  font: inherit;
+  padding: 5px 8px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--fg);
+  min-width: 0;
+}
+
+.lead-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.lead-row input {
+  width: 90px;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 560px) {
+  .editor {
+    grid-template-columns: 12px 1fr auto;
+    row-gap: 4px;
+  }
+
+  .timeline {
+    height: 96px;
+  }
 }

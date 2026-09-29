@@ -18,6 +18,7 @@ from modules.shift_reminder.strategy import PeriodStrategy
 from modules.shift_reminder.webapi import (
     build_status,
     format_remaining,
+    order_shifts,
     record_brief,
     shift_brief,
 )
@@ -190,16 +191,48 @@ def test_build_status_is_json_serializable() -> None:
 def test_build_status_exposes_shift_definitions_for_the_editor() -> None:
     """页面表单要预填当前三班，所以状态里必须带上定义（**只读用途**）。
 
-    注意顺序：`validate()` 按**开始时刻**排序，所以这里出来的是
-    夜班(02:00) → 早班(08:00) → 晚班(20:00)，而不是配置里写的第 1/2/3 班。
-    页面按名字回填，不依赖顺序；而**与排班表对应**时必须用配置的原始顺序
-    （见 `parse_shift_order`）——两件事不能混。
+    **不传 `shift_order` 时**，出来的是 `validate()` 排过序的顺序：夜班(02:00) →
+    早班(08:00) → 晚班(20:00)，而不是配置里写的第 1/2/3 班。
+
+    这条只钉住「原样透传」这个向后兼容行为。**页面要用的是配置顺序**，
+    见 `test_build_status_restores_config_order_for_the_editor`——两者不能混。
     """
     data = _status(datetime(2026, 9, 29, 1, 45), shifts=TABLE.shifts)
 
     assert [item["name"] for item in data["shifts"]] == ["夜班", "早班", "晚班"]
-    assert data["shifts"][1] == {"name": "早班", "start": "08:00", "end": "20:00", "hours": 12}
+    assert data["shifts"][1]["start"] == "08:00"
     assert data["shifts"][0]["hours"] == 6
+
+
+def test_build_status_restores_config_order_for_the_editor() -> None:
+    """传了 `shift_order` 就要按**配置顺序**给，否则页面会把时刻写错段。
+
+    这是修一个真缺陷：`ShiftTable.shifts` 按开始时刻排序（夜班跑到最前），而页面的
+    「第一班」对应 `shift_1`。若直接拿排序结果填位置，用户的早班位置会显示夜班，
+    保存时就把夜班时刻写进 `shift_1`。
+    """
+    data = _status(
+        datetime(2026, 9, 29, 1, 45),
+        shifts=TABLE.shifts,
+        shift_order=("早班", "晚班", "夜班"),
+    )
+
+    assert [item["name"] for item in data["shifts"]] == ["早班", "晚班", "夜班"]
+    assert [item["slot"] for item in data["shifts"]] == [1, 2, 3]
+    assert data["shifts"][0]["start"] == "08:00"
+    assert data["shifts"][0]["hours"] == 12
+
+
+def test_order_shifts_falls_back_when_names_do_not_match() -> None:
+    """顺序对不上时**原样返回**，不许因为改过名字就丢班次。"""
+    assert order_shifts(TABLE.shifts, ("早班", "夜班")) == TABLE.shifts
+    assert order_shifts(TABLE.shifts, None) == TABLE.shifts
+
+
+def test_order_shifts_keeps_every_shift_exactly_once() -> None:
+    """重排是一次置换：不重复、不丢失。"""
+    ordered = order_shifts(TABLE.shifts, ("晚班", "夜班", "早班"))
+    assert sorted(s.name for s in ordered) == sorted(s.name for s in TABLE.shifts)
 
 
 def test_build_status_shifts_default_to_empty_list() -> None:

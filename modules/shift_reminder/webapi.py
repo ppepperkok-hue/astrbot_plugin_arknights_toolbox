@@ -60,6 +60,34 @@ def shift_brief(shift: Shift) -> dict[str, str]:
     }
 
 
+def order_shifts(
+    shifts: Sequence[Any], shift_order: Sequence[str] | None = None
+) -> tuple[Any, ...]:
+    """按**配置里的原始顺序**重排班次。
+
+    为什么需要它：``ShiftTable.shifts`` 是**按开始时刻升序**排过的（夜班 02:00 会跑到
+    最前），而配置里的 ``shift_1/2/3`` 有自己的顺序，页面表单与写回都按后者。直接拿
+    排过序的元组填「第一班」，用户的早班位置就会显示夜班——**保存时把时刻写错段**。
+
+    Args:
+        shifts: 班次序列（可能已被按时刻排序）。
+        shift_order: 配置里的班次名顺序（``shift_1`` → ``shift_2`` → ``shift_3``）。
+            为空或与 ``shifts`` 对不上（例如名字被改过）时**原样返回**——宁可顺序不理想，
+            也不能丢班次。
+
+    Returns:
+        重排后的元组；无法重排时是 ``shifts`` 的原顺序副本。
+    """
+    items = tuple(shifts)
+    if not shift_order:
+        return items
+    by_name = {shift.name: shift for shift in items}
+    ordered = tuple(by_name[name] for name in shift_order if name in by_name)
+    if len(ordered) != len(items):
+        return items
+    return ordered
+
+
 def record_brief(record: SendRecordLike) -> dict[str, Any]:
     """一条发送记录。时间用 ISO 8601，交给前端自己决定怎么显示。"""
     return {
@@ -80,6 +108,7 @@ def build_status(
     breaker_open: bool,
     consecutive_failures: int,
     shifts: Sequence[Any] = (),
+    shift_order: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """组装页面要的状态 JSON。
 
@@ -93,11 +122,15 @@ def build_status(
         consecutive_failures: 连续失败次数。
         shifts: 当前三班定义，供页面表单预填（**只读用途**；校验与写入在服务端，
             前端那份只是显示）。
+        shift_order: 配置里 ``shift_1/2/3`` 的名称顺序。**传了才会把 ``shifts`` 从
+            「按时刻排序」恢复成「按配置顺序」**——页面表单与写回都按后者，
+            顺序错了会把时刻写进错误的段（见 :func:`order_shifts`）。
 
     Returns:
         可 JSON 序列化的 dict；字段形状见本模块 docstring 与测试。
     """
     remaining = snapshot.change_at - snapshot.now
+    slots = order_shifts(shifts, shift_order)
     return {
         "now": snapshot.now.isoformat(),
         "current": shift_brief(snapshot.current),
@@ -114,9 +147,11 @@ def build_status(
         "shifts": [
             {
                 **shift_brief(shift),
+                "slot": slot,
                 "hours": shift.duration_minutes // 60,
+                "minutes": shift.duration_minutes,
             }
-            for shift in shifts
+            for slot, shift in enumerate(slots, start=1)
         ],
         "recent": [record_brief(item) for item in recent],
     }

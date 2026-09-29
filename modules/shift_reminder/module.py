@@ -740,6 +740,11 @@ class ShiftReminderModule(Module):
             roster_imported=self._store.get(ROSTER_KEY) is not None,
             breaker_open=self._breaker.is_open,
             consecutive_failures=self._breaker.consecutive_failures,
+            # 必须传**配置里的原始顺序**，不是 `table.shifts`：后者按开始时刻
+            # 升序排过（夜班 02:00 会跑到最前），而页面表单是按位置认
+            # `shift_1/2/3` 的——用排序后的顺序回填，用户会看到「第一班 = 夜班」，
+            # 一保存就把夜班时刻写进 `shift_1`，配置被改坏。
             shifts=self._strategy.table.shifts,
+            shift_order=self._shift_order,
         )
         return json_response(payload)
