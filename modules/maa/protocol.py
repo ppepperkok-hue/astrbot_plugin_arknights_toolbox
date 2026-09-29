@@ -17,13 +17,18 @@
 5. `status` 只有 `SUCCESS` / `FAILED`，且文档明确：**「通常不論成敗皆彙報 SUCCESS」**。
    ⇒ **`SUCCESS` 不等于任务成功**，它更像「指令我处理完了」。将来任何把它转述成
    「换班成功」的文案都是过度解读。
+6. **端点必须可重入**（2026-09-29 补记，抓的是 zh-cn 原文）：任务体形如
+   `{"id": ..., "type": ...}`，且「该端点**应当可以重入并且重复返回需要执行的任务**，
+   **MAA 会自动记录任务 id，对于相同的 id，不会重复执行**」。
+   ⇒ 「没有任务」与「同一条任务重复下发」都是合法的，而**后者正是我们做去重的依据**。
+   任务种类与形状见 `tasks.py`，队列见 `queue.py`。
 
 本文件只处理**形状与渲染**，不碰网络、不碰框架。
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 __all__ = [
@@ -37,9 +42,11 @@ __all__ = [
     "describe_request",
     "empty_tasks_response",
     "extract_status",
+    "extract_task_id",
     "redact_text",
     "report_ack_response",
     "shape_of",
+    "tasks_response",
 ]
 
 #: 两个端点在本模块路由前缀下的相对路径。名字照官方文档，不自行发挥。
@@ -70,13 +77,33 @@ MAX_DEPTH = 3
 MAX_FIELDS = 32
 
 
-def empty_tasks_response() -> dict[str, Any]:
-    """领任务端点的响应：**一个常量**。
+def tasks_response(tasks: Iterable[Mapping[str, Any]] = ()) -> dict[str, Any]:
+    """领任务端点的响应：**任务列表**。
 
-    它是常量这件事本身是安全设计的一部分——见 `module.MaaModule._web_get_task`：
-    端点的响应不来自请求里的任何字段，所以这里**结构上不可能**被用来执行外部指令。
+    文档原文：「**如果不存在 tasks 则视为连接无效**」——所以「没有任务」必须写成
+    **空数组** `{"tasks": []}`，不能省略字段、也不能回非 JSON。
+    把这件事集中在本函数里，而不是交给每个调用点自己记得：给这个端点加真实任务时
+    最容易犯的错就是顺手写成 `{"tasks": None}`，而那个错的表现是**MAA 认为连接无效**，
+    离真因很远。
     """
-    return {"tasks": []}
+    return {"tasks": [dict(task) for task in tasks]}
+
+
+def empty_tasks_response() -> dict[str, Any]:
+    """「没有任务」的响应，与 `tasks_response()` 同一个出口，形状只有一处定义。"""
+    return tasks_response()
+
+
+def extract_task_id(payload: object) -> str:
+    """从汇报体里取 `task`（任务 id）；**取不到就返回空串**。
+
+    与 `extract_status` 同一取舍：**不猜**。拿不准就留空，调用方据此报
+    「对不上号」，而不是把一个垃圾值当成 id 去结清一个真实任务。
+    """
+    if not isinstance(payload, Mapping):
+        return ""
+    value = payload.get("task")
+    return value if isinstance(value, str) else ""
 
 
 def report_ack_response() -> dict[str, Any]:

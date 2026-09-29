@@ -13,7 +13,10 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta
 from types import SimpleNamespace
+
+import pytest
 
 from modules.maa import module as maa_module
 from modules.maa import protocol
@@ -28,7 +31,42 @@ EXPECTED_ROUTES = {
 }
 
 
-def _boot(monkeypatch) -> tuple[maa_module.MaaModule, list[tuple], list[tuple]]:
+class _FakeJob:
+    def __init__(self, name: str, job_id: str) -> None:
+        self.name = name
+        self.job_id = job_id
+
+
+class _FakeCronManager:
+    """最小的 cron 替身：只记名字、能给 id、能删。"""
+
+    def __init__(self) -> None:
+        self.jobs: list[_FakeJob] = []
+        self.deleted: list[str] = []
+        self.added: list[dict] = []
+        self._next = 0
+
+    async def add_basic_job(self, **kwargs):  # noqa: ANN003 - 框架签名就是 kwargs
+        self._next += 1
+        self.added.append(kwargs)
+        job = _FakeJob(str(kwargs.get("name", "")), f"job-{self._next}")
+        self.jobs.append(job)
+        return job
+
+    async def list_jobs(self):
+        return list(self.jobs)
+
+    async def delete_job(self, job_id: str) -> None:
+        self.deleted.append(job_id)
+        self.jobs = [job for job in self.jobs if job.job_id != job_id]
+
+
+def _boot(
+    monkeypatch,
+    *,
+    config: dict | None = None,
+    cron_manager: object | None = None,
+) -> tuple[maa_module.MaaModule, list[tuple], list[tuple]]:
     """把模块跑起来，返回 (模块, 已注册路由, 已发送消息)。"""
     registered: list[tuple] = []
     sent: list[tuple] = []
@@ -42,9 +80,10 @@ def _boot(monkeypatch) -> tuple[maa_module.MaaModule, list[tuple], list[tuple]]:
             (route, handler, methods, desc)
         ),
         send_message=send_message,
+        cron_manager=cron_manager,
     )
     instance = maa_module.MaaModule()
-    asyncio.run(instance.initialize(ctx, {}))
+    asyncio.run(instance.initialize(ctx, config if config is not None else {}))
     return instance, registered, sent
 
 
@@ -110,12 +149,14 @@ def _collect_logs(monkeypatch) -> list[str]:
     return messages
 
 
-def _event(*, private: bool = True, admin: bool = True) -> SimpleNamespace:
+def _event(
+    *, private: bool = True, admin: bool = True, message: str = "/ak maa"
+) -> SimpleNamespace:
     return SimpleNamespace(
         unified_msg_origin="napcat2:FriendMessage:10001",
         is_private_chat=lambda: private,
         is_admin=lambda: admin,
-        message_str="/ak maa",
+        message_str=message,
     )
 
 
@@ -315,7 +356,8 @@ def test_status_text_before_any_arrival_says_so(monkeypatch) -> None:
     text = instance._status_text()
 
     assert "还没收到过请求" in text
-    assert "不会执行任何操作" in text
+    assert "队列：空" in text
+    assert "还没派过任务" in text
 
 
 def test_status_text_after_arrival_reports_counts_and_the_success_caveat(
@@ -330,7 +372,7 @@ def test_status_text_after_arrival_reports_counts_and_the_success_caveat(
 
     assert "已收到 1 次请求" in text
     assert "status=SUCCESS" in text
-    assert "别当成功凭证" in text
+    assert "不能当「班换对了」的凭证" in text
 
 
 def test_handle_command_replies_and_stops(monkeypatch) -> None:
@@ -371,7 +413,7 @@ def test_handle_command_does_not_throw_at_the_host(monkeypatch) -> None:
     handled = asyncio.run(instance.handle_command("maa", _event()))
 
     assert handled is True
-    assert any("处理 /ak maa 时出错" in message for message in messages)
+    assert any("处理子命令" in message for message in messages)
 
 
 # --- 接入：加模块不改宿主 ---------------------------------------------------
@@ -385,3 +427,370 @@ def test_discovery_finds_maa_and_keeps_the_other_modules() -> None:
 
     assert "maa" in found
     assert {"shift_reminder", "recruit", "skland"} <= set(known_module_names())
+
+
+# --- 确认制：没有确认，队列永远是空的 ---------------------------------------
+
+
+def _text_of(chain: object) -> str:
+    """从消息链里取出纯文本（`conftest` 的 MessageChain 把文本段放在 `parts`）。"""
+    return "".join(part for part in chain.parts if isinstance(part, str))
+
+
+def _last_text(sent: list[tuple]) -> str:
+    assert sent, "应当发过至少一条消息"
+    return _text_of(sent[-1][1])
+
+
+def test_get_task_stays_empty_until_the_user_confirms(monkeypatch) -> None:
+    """**本模块的安全底线**：没有用户确认，端点永远回空任务表。"""
+    instance, _registered, _sent = _boot(monkeypatch)
+    _patch_request(monkeypatch, body={"user": FAKE_USER, "device": FAKE_DEVICE})
+
+    responses = [asyncio.run(instance._web_get_task()) for _ in range(5)]
+
+    assert responses == [{"tasks": []}] * 5
+
+
+def test_confirming_once_queues_exactly_one_task(monkeypatch) -> None:
+    instance, _registered, _sent = _boot(monkeypatch)
+
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa run")))
+    _patch_request(monkeypatch, body={})
+    response = asyncio.run(instance._web_get_task())
+
+    assert len(response["tasks"]) == 1
+    assert response["tasks"][0]["type"] == "LinkStart", "所有者要的是「跑完全套流程」"
+
+
+def test_confirming_twice_still_yields_exactly_one_task(monkeypatch) -> None:
+    """重复确认既不能变成「多跑一次」，也不该被当成出错。"""
+    instance, _registered, sent = _boot(monkeypatch)
+
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa run")))
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa run")))
+    _patch_request(monkeypatch, body={})
+
+    assert len(asyncio.run(instance._web_get_task())["tasks"]) == 1
+    assert "没有再派第二个" in _last_text(sent)
+
+
+def test_polling_a_hundred_times_reuses_the_same_task_id(monkeypatch) -> None:
+    """MAA 一秒轮询一次。一百次里必须始终是同一个 id——协议说同 id 不会重复执行，
+    所以「重复下发」是安全的，而「换一个 id」是致命的。"""
+    instance, _registered, _sent = _boot(monkeypatch)
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa run")))
+    _patch_request(monkeypatch, body={})
+
+    ids = {asyncio.run(instance._web_get_task())["tasks"][0]["id"] for _ in range(100)}
+
+    assert len(ids) == 1
+
+
+def test_response_stays_independent_of_the_request_even_with_a_queued_task(
+    monkeypatch,
+) -> None:
+    """**本文件最重要的一条。**
+
+    端点匿名可达，所以「下发什么」只能来自我们自己的队列；请求里自报的
+    `user` / `device` 概不采信——那是谁都能编的字段。将来若有人按请求内容拼任务，
+    这条会立刻红。
+    """
+    instance, _registered, _sent = _boot(monkeypatch)
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa run")))
+    bodies: list[object] = [
+        None,
+        {},
+        {"user": FAKE_USER, "device": FAKE_DEVICE},
+        {"tasks": [{"id": "attacker", "type": "LinkStart"}]},
+        {"device": "attacker"},
+        "not even an object",
+    ]
+
+    responses = []
+    for body in bodies:
+        _patch_request(monkeypatch, body=body)
+        responses.append(asyncio.run(instance._web_get_task()))
+
+    assert responses[0]["tasks"], "队列里那个任务应当被下发"
+    assert responses == [responses[0]] * len(bodies)
+
+
+# --- 「我自己换」 -----------------------------------------------------------
+
+
+def test_skip_queues_nothing_and_is_recorded(monkeypatch) -> None:
+    instance, _registered, sent = _boot(monkeypatch)
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa run")))
+
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa skip")))
+
+    _patch_request(monkeypatch, body={})
+    assert asyncio.run(instance._web_get_task()) == {"tasks": []}
+    assert instance._last_manual_at is not None, "要记下「这次没让 MAA 跑」供排查"
+    assert "不会前进" in _last_text(sent)
+
+
+def test_cancel_clears_the_queue(monkeypatch) -> None:
+    instance, _registered, _sent = _boot(monkeypatch)
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa run")))
+
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa cancel")))
+
+    _patch_request(monkeypatch, body={})
+    assert asyncio.run(instance._web_get_task()) == {"tasks": []}
+
+
+def test_unknown_subcommand_lists_the_usage(monkeypatch) -> None:
+    instance, _registered, sent = _boot(monkeypatch)
+
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa frobnicate")))
+
+    text = _last_text(sent)
+    assert "未知的 maa 子命令" in text
+    assert "/ak maa run" in text
+
+
+# --- 回报转达：诚实措辞 ------------------------------------------------------
+
+
+def test_report_is_relayed_without_claiming_success(monkeypatch) -> None:
+    """端到端的那条路径：确认 → 取走 → 回报 → 回一句话给用户。"""
+    instance, _registered, sent = _boot(monkeypatch)
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa run")))
+    _patch_request(monkeypatch, body={})
+    task_id = asyncio.run(instance._web_get_task())["tasks"][0]["id"]
+    sent.clear()
+
+    _patch_request(
+        monkeypatch,
+        body={
+            "user": FAKE_USER,
+            "device": FAKE_DEVICE,
+            "task": task_id,
+            "status": "SUCCESS",
+            "payload": "",
+        },
+    )
+    assert asyncio.run(instance._web_report_status()) == {"ok": True}
+
+    text = _last_text(sent)
+    assert "已执行" in text
+    assert "成功" not in text
+    assert instance._queue.pending is None
+
+
+def test_a_duplicate_report_does_not_notify_twice(monkeypatch) -> None:
+    instance, _registered, sent = _boot(monkeypatch)
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa run")))
+    _patch_request(monkeypatch, body={})
+    task_id = asyncio.run(instance._web_get_task())["tasks"][0]["id"]
+    body = {"task": task_id, "status": "SUCCESS"}
+    _patch_request(monkeypatch, body=body)
+    asyncio.run(instance._web_report_status())
+    sent.clear()
+
+    asyncio.run(instance._web_report_status())
+
+    assert sent == [], "重复汇报不该再刷一条一样的消息"
+
+
+def test_an_unknown_report_is_told_apart(monkeypatch) -> None:
+    """插件重启后队列会丢，而 MAA 照跑照汇报——如实说对不上号。"""
+    instance, _registered, sent = _boot(monkeypatch)
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa")))
+    sent.clear()
+
+    _patch_request(monkeypatch, body={"task": "n" * 36, "status": "SUCCESS"})
+    asyncio.run(instance._web_report_status())
+
+    assert "没派过" in _last_text(sent)
+
+
+# --- 超时告知：不许静默 ------------------------------------------------------
+
+
+def test_sweep_tells_the_user_when_nobody_fetched_the_task(monkeypatch) -> None:
+    """电脑没开时，MAA 一直不来取——这件事必须让用户知道，而且要说清班次没动。"""
+    instance, _registered, sent = _boot(monkeypatch)
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa run")))
+    sent.clear()
+    # 模块自己建队列，所以直接把创建时间推回两小时——比注入时钟更直白，
+    # 也不会为了可测性在生产代码上开一个只有测试用的口子。
+    assert instance._queue.pending is not None
+    instance._queue.pending.created_at = datetime.now() - timedelta(hours=2)
+
+    asyncio.run(instance._sweep())
+
+    text = _last_text(sent)
+    assert "没来取" in text
+    assert "没有前进" in text
+    assert instance._queue.pending is None
+
+
+def test_sweep_stays_quiet_while_the_task_is_still_fresh(monkeypatch) -> None:
+    instance, _registered, sent = _boot(monkeypatch)
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa run")))
+    sent.clear()
+
+    asyncio.run(instance._sweep())
+
+    assert sent == []
+    assert instance._queue.pending is not None
+
+
+def test_a_notice_is_logged_when_there_is_nowhere_to_send_it(monkeypatch) -> None:
+    """没有通知目标时不能静默：内容必须落在日志里（重启后就会这样）。"""
+    messages = _collect_logs(monkeypatch)
+    instance, _registered, _sent = _boot(monkeypatch)
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa run")))
+    instance._umo = ""
+    assert instance._queue.pending is not None
+    instance._queue.pending.created_at = datetime.now() - timedelta(hours=2)
+
+    asyncio.run(instance._sweep())
+
+    assert any("没有通知目标" in message for message in messages)
+
+
+# --- 定时任务：注册、清理、不碰别人的 ----------------------------------------
+
+
+def test_the_sweep_job_is_registered_under_this_module_s_prefix(monkeypatch) -> None:
+    cron = _FakeCronManager()
+
+    _boot(monkeypatch, cron_manager=cron)
+
+    assert [kwargs["name"] for kwargs in cron.added] == [maa_module.SWEEP_JOB_NAME]
+    assert maa_module.SWEEP_JOB_NAME.startswith(maa_module.JOB_PREFIX)
+
+
+def test_terminate_removes_its_own_jobs(monkeypatch) -> None:
+    cron = _FakeCronManager()
+    instance, _registered, _sent = _boot(monkeypatch, cron_manager=cron)
+
+    asyncio.run(instance.terminate())
+
+    assert cron.deleted == ["job-1"]
+    assert cron.jobs == []
+
+
+def test_initialize_clears_stale_own_jobs_but_touches_no_one_else_s(monkeypatch) -> None:
+    """清理只按自己的前缀。**别人的任务一个都不许动**——那会拆掉换班提醒。"""
+    cron = _FakeCronManager()
+    cron.jobs.append(_FakeJob(f"{maa_module.JOB_PREFIX}stale", "stale-1"))
+    cron.jobs.append(_FakeJob("ak_toolbox:shift_reminder:早班", "foreign-1"))
+
+    _boot(monkeypatch, cron_manager=cron)
+
+    assert "stale-1" in cron.deleted
+    assert "foreign-1" not in cron.deleted
+    surviving = {job.job_id for job in cron.jobs}
+    assert "foreign-1" in surviving, "别人的任务必须原样留着"
+    assert "stale-1" not in surviving
+
+
+def test_a_missing_cron_manager_degrades_loudly_without_killing_the_module(
+    monkeypatch,
+) -> None:
+    """少一个巡检只意味着「超时不会主动告知」，派任务本身照常。"""
+    messages = _collect_logs(monkeypatch)
+
+    instance, _registered, _sent = _boot(monkeypatch)
+
+    assert any("过期巡检未注册" in message for message in messages)
+    assert instance.unavailable_reason is None
+
+
+# --- 配置：非法值必须当场报错 -----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"task_type": "NotATask"},
+        {"task_type": ""},
+        {"task_type": "LinkStart-Combat"},
+        {"task_ttl_minutes": 0},
+        {"task_ttl_minutes": "30"},
+        {"fetched_ttl_minutes": -5},
+    ],
+)
+def test_invalid_config_fails_loudly(monkeypatch, config) -> None:
+    """**不静默回落到默认值**：用户改了个错值却以为生效了，比直接报错糟得多。"""
+    instance = maa_module.MaaModule()
+
+    with pytest.raises(ValueError):
+        asyncio.run(instance.initialize(SimpleNamespace(), config))
+
+
+def test_apply_config_switches_the_task_type(monkeypatch) -> None:
+    instance, _registered, _sent = _boot(monkeypatch)
+
+    asyncio.run(instance.apply_config({"task_type": "LinkStart-Base"}))
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa run")))
+    _patch_request(monkeypatch, body={})
+
+    assert asyncio.run(instance._web_get_task())["tasks"][0]["type"] == "LinkStart-Base"
+
+
+def test_apply_config_keeps_a_task_maa_may_already_have_taken(monkeypatch) -> None:
+    """重建队列会把 MAA 可能已经取走的任务丢掉，用户就会看到「派了但查不到」。"""
+    instance, _registered, _sent = _boot(monkeypatch)
+    asyncio.run(instance.handle_command("maa", _event(message="/ak maa run")))
+    _patch_request(monkeypatch, body={})
+    task_id = asyncio.run(instance._web_get_task())["tasks"][0]["id"]
+
+    asyncio.run(instance.apply_config({"task_ttl_minutes": 5}))
+
+    assert instance._queue.pending is not None
+    assert instance._queue.pending.task_id == task_id
+
+
+# --- 铁律：maa 起不来不许拖垮邻居 -------------------------------------------
+
+
+class _Sibling:
+    """最小兄弟模块，用来验证「一个模块倒下不拖垮别的」。"""
+
+    name = "buddy"
+    config_key = "buddy"
+    unavailable_reason = None
+
+    def __init__(self) -> None:
+        self.started = False
+
+    async def initialize(self, ctx, config):  # noqa: ANN001, ANN201 - 契约签名
+        self.started = True
+
+    async def terminate(self) -> None:
+        return None
+
+    async def handle_command(self, command: str, event: object) -> bool:
+        return False
+
+
+def test_a_broken_maa_module_does_not_stop_a_sibling() -> None:
+    """「森空岛失效绝不许拖垮核心功能」的宿主层形态，用真模块跑一遍。
+
+    这里用局部注册表（`ModuleRegistry.add`）而不是全局的 `register_module`，
+    免得把发现出来的工厂改掉、影响别的用例。
+    """
+    from core.registry import ModuleRegistry
+
+    registry = ModuleRegistry()
+    registry.add(maa_module.MaaModule())
+    buddy = _Sibling()
+    registry.add(buddy)
+
+    asyncio.run(
+        registry.start_all(
+            ctx=SimpleNamespace(),
+            config={"maa": {"task_type": "NotATask"}, "buddy": {}},
+        )
+    )
+
+    assert buddy.started is True
+    assert "buddy" in registry.started_names
+    assert [name for name, _reason in registry.failed_modules] == ["maa"]
+    assert "NotATask" in registry.failed_modules[0][1], "失败原因要说清是哪个值"
