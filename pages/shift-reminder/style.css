@@ -621,3 +621,63 @@ input[type="number"] {
     height: 96px;
   }
 }
+
+/* --- 班次切换（分段控件）-----------------------------------------------------
+   用户要的是「点第一班看第一班、点第二班看第二班」，而不是一页摊开三班
+   40 多间房。所以班次做成三个视图，一次只渲染一个。
+
+   颜色全部走既有语义 token（--card / --line / --muted / --fg / --shift-1），
+   不写死色值——这样深浅色主题自动跟随，组件样式不用各写一遍。 */
+.shift-tabs {
+  display: flex;
+  gap: 6px;
+  margin: 4px 0 12px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  /* 手机窄屏时横向滚动而不是折行——折行会让三个 tab 高低不齐。 */
+  overflow-x: auto;
+}
+
+.shift-tab {
+  flex: 1 1 auto;
+  min-width: 92px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.shift-tab:hover {
+  color: var(--fg);
+}
+
+.shift-tab.is-active {
+  background: var(--card);
+  border-color: var(--line);
+  color: var(--fg);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 6%);
+}
+
+.shift-tab-label {
+  font-weight: 600;
+}
+
+.shift-tab-hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* 键盘可达：Tab 聚焦要有可见反馈。 */
+.shift-tab:focus-visible {
+  outline: 2px solid var(--shift-1);
+  outline-offset: 1px;
+}

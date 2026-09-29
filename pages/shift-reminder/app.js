@@ -247,6 +247,17 @@ let leadMinutes = 10;
 /** 排班表里读出的整点小时建议（`[12, 6, 6]`）；没有则为 null。 */
 let suggestedHours = null;
 
+/**
+ * 当前选中的班次下标（页面上的分段控件）。
+ *
+ * 存的是 **`view.shifts` 数组里的位置**，不是 `plan_index`——两者在多数情况下
+ * 相同，但不要假设，因为 `plan_index` 是排班表里的编号、数组位置是渲染顺序。
+ */
+let selectedShiftIndex = 0;
+
+/** 最近一次成功渲染的 roster view；切换班次时直接重渲染，不必再请求接口。 */
+let lastRosterView = null;
+
 function snapshotSegments() {
   return segments.map((seg) => ({ ...seg }));
 }
@@ -673,6 +684,83 @@ function operatorChip(name) {
   return chip;
 }
 
+/**
+ * 班次分段控件：第 N 班 + 时长。点一下只看那一班。
+ *
+ * 为什么要做成一班一视图：用户的原话是「点击第一班时，点击第二班时等等」——
+ * 一页摊开三班 40 多间房根本没法看。默认选中当前正在进行的班次（如果算得出）。
+ *
+ * @param {Array} shifts  `view.shifts`
+ * @param {object} view  整个 roster view（用于取时长建议）
+ */
+function buildShiftTabs(shifts, view) {
+  const tabs = document.createElement("div");
+  tabs.className = "shift-tabs";
+  tabs.setAttribute("role", "tablist");
+  tabs.setAttribute("aria-label", "选择要查看的班次");
+
+  const hours = Array.isArray(view.duration_suggestion_hours)
+    ? view.duration_suggestion_hours
+    : null;
+
+  shifts.forEach((shift, index) => {
+    const tab = document.createElement("button");
+    tab.type = "button";
+    tab.className = "shift-tab";
+    tab.setAttribute("role", "tab");
+    const active = index === selectedShiftIndex;
+    tab.setAttribute("aria-selected", active ? "true" : "false");
+    tab.tabIndex = active ? 0 : -1;
+    if (active) {
+      tab.classList.add("is-active");
+    }
+
+    const label = document.createElement("span");
+    label.className = "shift-tab-label";
+    label.textContent = `第 ${shift.plan_index} 班`;
+    tab.append(label);
+
+    // 时长只在能从排班表读出来时显示——读不出来就不显示，不编。
+    if (hours && Number.isFinite(hours[index]) && hours[index] > 0) {
+      const meta = document.createElement("span");
+      meta.className = "shift-tab-hint";
+      meta.textContent = `${hours[index]}h`;
+      tab.append(meta);
+    }
+
+    tab.addEventListener("click", () => selectShift(index));
+    tabs.append(tab);
+  });
+
+  // 键盘可达：左右方向键也能切（别只支持鼠标）。
+  tabs.addEventListener("keydown", (event) => {
+    let delta = 0;
+    if (event.key === "ArrowRight") {
+      delta = 1;
+    } else if (event.key === "ArrowLeft") {
+      delta = -1;
+    } else {
+      return;
+    }
+    event.preventDefault();
+    const next = (selectedShiftIndex + delta + shifts.length) % shifts.length;
+    selectShift(next);
+  });
+
+  return tabs;
+}
+
+/** 切换班次并重渲染（用缓存的数据，不重新请求）。 */
+function selectShift(index) {
+  if (index === selectedShiftIndex) {
+    return;
+  }
+  selectedShiftIndex = index;
+  if (lastRosterView) {
+    renderRoster(lastRosterView);
+  }
+}
+
 function renderRoster(view) {
   const host = byId("roster-detail");
   const summaryHost = byId("roster-summary");
@@ -683,6 +771,8 @@ function renderRoster(view) {
   if (summaryHost) {
     summaryHost.textContent = "";
   }
+
+  lastRosterView = view && view.imported === true ? view : null;
 
   if (!view || view.imported !== true) {
     suggestedHours = null;
@@ -738,8 +828,22 @@ function renderRoster(view) {
     summaryHost.append(meta);
   }
 
-  // --- 逐班：按房型成块 -----------------------------------------------------
-  (view.shifts || []).forEach((shift, shiftIndex) => {
+  // --- 班次切换：三班各是一个视图，一次只看一个 --------------------------------
+  // 用户的原话是「点击第一班时，点击第二班时」——一页摊开三班 40 多间房，
+  // 眼睛根本没法看。所以这里做成分段控件，一次只渲染选中的那一班。
+  const shifts = view.shifts || [];
+  if (shifts.length > 0) {
+    selectedShiftIndex = Math.max(0, Math.min(selectedShiftIndex, shifts.length - 1));
+  }
+  if (shifts.length > 1) {
+    host.append(buildShiftTabs(shifts, view));
+  }
+
+  // --- 逐班：按房型成块（只渲染选中的那一班） ---------------------------------
+  shifts.forEach((shift, shiftIndex) => {
+    if (shiftIndex !== selectedShiftIndex) {
+      return;
+    }
     const block = document.createElement("section");
     block.className = `roster-shift shift-tint-${shiftIndex % 3}`;
 
