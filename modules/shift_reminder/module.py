@@ -30,7 +30,7 @@ except ImportError:  # pragma: no cover
     from ...core.module import Module
     from ...core.permission import session_allowed
     from ...core.storage import JsonlSendLog, JsonStateStore, SendRecord
-from . import notify, roster, scheduler, webapi
+from . import avatars, notify, roster, scheduler, webapi
 from .schedule import ConfigError, Shift, ShiftTable, parse_hhmm, validate
 from .schedule_file import ScheduleFileError, parse_schedule_file
 from .strategy import PeriodStrategy
@@ -218,6 +218,9 @@ class ShiftReminderModule(Module):
         self._shift_order: tuple[str, ...] = ()
         # `/ak import` 只认这个目录里的文件；由 initialize 填好（见 resolve_import_path）。
         self._data_dir: Path | None = None
+        # 干员头像映射（中文名 → 外链 URL）。装载失败时为 None，页面退回首字色块——
+        # 头像只是锦上添花，**绝不能因为它让插件加载失败**。
+        self._avatars: avatars.AvatarIndex | None = None
 
     # --- 生命周期 -----------------------------------------------------------
 
@@ -246,12 +249,38 @@ class ShiftReminderModule(Module):
         self._store = JsonStateStore(data_dir / "state.json")
         self._send_log = JsonlSendLog(data_dir / "sends.jsonl", keep=SEND_LOG_KEEP)
         self._job_ids = []
+        self._avatars = self._load_avatars()
 
         await self._register_jobs(cron_manager, table, lead_minutes, timezone)
 
         # 放在最后注册：前面任何一步失败都会让 initialize 抛出并被宿主回滚，
         # 此时页面路由不该已经指向一个没初始化完的实例。
         self._register_web_api(ctx)
+
+    def _load_avatars(self) -> avatars.AvatarIndex | None:
+        """装载干员头像映射（数据文件在插件包内，**只读**）。
+
+        失败时**记 WARNING 并返回 None**，不抛异常：头像没有映射只意味着页面退回
+        中文首字色块，功能依旧完整——为它让整个模块起不来是本末倒置。但降级必须
+        留痕，否则用户看到一片色块也不知道是坏了还是本来就这样（宪法 §2 第 2 条）。
+
+        数据由 `scripts/build_avatar_map.py` 生成，来源与许可见数据文件的 ``_comment``。
+        """
+        path = Path(__file__).resolve().parent / "data" / "avatar_map.json"
+        index = avatars.load_avatar_index(path)
+        if index is None:
+            logger.warning(
+                "[ak_toolbox][shift_reminder] 头像映射不可用（%s 缺失或格式不对），"
+                "页面将显示中文首字色块；换班提醒与排班表不受影响。"
+                "可用 scripts/build_avatar_map.py 重新生成。",
+                path.name,
+            )
+            return None
+        logger.info(
+            "[ak_toolbox][shift_reminder] 已装载头像映射：%d 位干员（外链引用，不打包图片）",
+            index.size,
+        )
+        return index
 
     async def _register_jobs(
         self,
@@ -754,7 +783,22 @@ class ShiftReminderModule(Module):
         """
         if self._store is None:
             return error_response("换班提醒模块尚未初始化完成，请稍后重试", status_code=503)
-        return json_response(webapi.roster_view(self._store.get(ROSTER_KEY)))
+
+        # 默认选中「当前正在进行的班次」：名字来自配置（早班），而排班表里的班次名
+        # 来自文件（Shift 1 · 12h），两者对不上——靠 _shift_order 那层既有映射搭桥，
+        # 对不上时 webapi 那边会老实退回第一班（见 current_shift_slot）。
+        current_shift = None
+        if self._strategy is not None:
+            current_shift = self._strategy.snapshot(self._now()).current.name
+
+        return json_response(
+            webapi.roster_view(
+                self._store.get(ROSTER_KEY),
+                current_shift=current_shift,
+                shift_order=self._shift_order,
+                avatars=self._avatars,
+            )
+        )
 
     async def _web_upload(self) -> Any:
         """接收页面提交的排班表（base64 + JSON POST）并导入。

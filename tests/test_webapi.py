@@ -383,14 +383,27 @@ def _roster_sample() -> dict:
 
 
 def test_roster_view_reports_not_imported_for_missing_roster() -> None:
-    """没导入过时给 `imported: False`，页面据此显示上传引导——不是空白。"""
-    assert webapi.roster_view(None) == {"imported": False}
+    """没导入过时给 `imported: False`，页面据此显示上传引导——不是空白。
+
+    未导入时也必须带上 ``current_slot`` 与 ``avatars``：前者让页面有确定的默认值，
+    后者让页面知道「头像映射装没装上」——两个键缺席会让前端去猜。
+    """
+    assert webapi.roster_view(None) == {
+        "imported": False,
+        "current_slot": 0,
+        "avatars": {"available": False, "matched": 0, "by_name": {}},
+    }
 
 
 def test_roster_view_reports_not_imported_for_wrong_shape() -> None:
     """形状不对时同样按「未导入」处理，绝不为了看起来有数据而编造结构。"""
-    assert webapi.roster_view({"shifts": "不是列表"}) == {"imported": False}
-    assert webapi.roster_view({}) == {"imported": False}
+    expected = {
+        "imported": False,
+        "current_slot": 0,
+        "avatars": {"available": False, "matched": 0, "by_name": {}},
+    }
+    assert webapi.roster_view({"shifts": "不是列表"}) == expected
+    assert webapi.roster_view({}) == expected
 
 
 def test_roster_view_keeps_and_flags_skipped_rooms() -> None:
@@ -913,4 +926,160 @@ def test_web_roster_before_import_shows_not_imported(tmp_path, monkeypatch) -> N
 
     payload = asyncio.run(instance._web_roster())
 
-    assert payload == {"imported": False}
+    assert payload["imported"] is False
+    assert payload["current_slot"] == 0
+    # 装配层确实把头像映射传下去了（测试环境里数据文件在，所以是 True）。
+    assert payload["avatars"]["available"] is True
+    assert payload["avatars"]["by_name"] == {}
+
+
+# --- 页面默认选中「当前班次」 --------------------------------------------------
+#
+# 为什么单独测这一块：排班表里的班次名来自**文件**（Shift 1 · 12h），而「当前是哪
+# 一班」来自**用户配置**（早班）——两个来源、名字对不上。这个项目已经因为班次顺序
+# 错位栽过两次，所以「对不上时怎么办」和「对得上时对不对」一样重要。
+
+
+def test_current_shift_slot_maps_config_order_to_plan_index() -> None:
+    """配置顺序里的第 N 个名字 ↔ plan_index N ↔ 数组下标 N-1。"""
+    shifts = [{"plan_index": 1}, {"plan_index": 2}, {"plan_index": 3}]
+    order = ("早班", "晚班", "夜班")
+
+    assert webapi.current_shift_slot("早班", order, shifts) == 0
+    assert webapi.current_shift_slot("晚班", order, shifts) == 1
+    assert webapi.current_shift_slot("夜班", order, shifts) == 2
+
+
+def test_current_shift_slot_follows_array_position_not_plan_index() -> None:
+    """返回的是**数组下标**，不是 plan_index——两者多数时候相同，但不能假设。"""
+    shifts = [{"plan_index": 3}, {"plan_index": 1}, {"plan_index": 2}]
+    order = ("早班", "晚班", "夜班")
+
+    # 晚班 → plan_index 2 → 它在数组里的位置是 2
+    assert webapi.current_shift_slot("晚班", order, shifts) == 2
+    # 夜班 → plan_index 3 → 位置 0
+    assert webapi.current_shift_slot("夜班", order, shifts) == 0
+
+
+def test_current_shift_slot_falls_back_to_first_when_name_not_in_order() -> None:
+    """名字对不上（配置改过、排班表换了）→ 老实退回第一个班，不报错、不猜。"""
+    shifts = [{"plan_index": 1}, {"plan_index": 2}, {"plan_index": 3}]
+
+    assert webapi.current_shift_slot("不存在的班次", ("早班", "晚班", "夜班"), shifts) == 0
+
+
+def test_current_shift_slot_falls_back_when_plan_index_absent() -> None:
+    """配置能对上，但排班表里没有这个 plan_index（班数不一致）→ 退回第一个班。"""
+    shifts = [{"plan_index": 1}]
+
+    assert webapi.current_shift_slot("夜班", ("早班", "晚班", "夜班"), shifts) == 0
+
+
+def test_current_shift_slot_falls_back_on_missing_inputs() -> None:
+    """当前班次未知、或配置顺序为空时都退回 0——这是永远安全的答案。"""
+    shifts = [{"plan_index": 1}, {"plan_index": 2}]
+
+    assert webapi.current_shift_slot(None, ("早班", "晚班"), shifts) == 0
+    assert webapi.current_shift_slot("", ("早班", "晚班"), shifts) == 0
+    assert webapi.current_shift_slot("早班", None, shifts) == 0
+    assert webapi.current_shift_slot("早班", (), shifts) == 0
+    assert webapi.current_shift_slot("早班", ("早班",), []) == 0
+
+
+def test_roster_view_exposes_current_slot() -> None:
+    """roster_view 把默认选中项交给页面——页面不再自己猜。"""
+    roster = _roster_sample()
+
+    view = webapi.roster_view(roster, current_shift="第二班", shift_order=("第一班", "第二班"))
+
+    assert view["current_slot"] == 1
+
+
+def test_roster_view_current_slot_falls_back_without_order() -> None:
+    """没传配置顺序时退回 0，而不是抛异常（页面必须总能渲染）。"""
+    view = webapi.roster_view(_roster_sample(), current_shift="第二班")
+
+    assert view["current_slot"] == 0
+
+
+# --- 干员头像：只发用得到的、发完整 URL -----------------------------------------
+
+
+class _FakeAvatars:
+    """假的头像查表：结构上匹配 `avatars.AvatarIndex` 用得到的那一个方法。"""
+
+    def __init__(self, mapping: dict[str, str]) -> None:
+        self._mapping = mapping
+        self.asked: list[str] = []
+
+    def url_map(self, names) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for name in names:
+            self.asked.append(name)
+            if name in result:
+                continue
+            url = self._mapping.get(name)
+            if url:
+                result[name] = url
+        return result
+
+
+def test_roster_view_without_avatars_reports_unavailable() -> None:
+    """映射没装载时明确说 False，页面据此走首字色块——不假装有头像。"""
+    view = webapi.roster_view(_roster_sample())
+
+    assert view["avatars"] == {"available": False, "matched": 0, "by_name": {}}
+
+
+def test_roster_view_attaches_only_names_used_in_the_roster() -> None:
+    """只发名单里真的出现过的干员——不把几百条映射整份塞进每次响应。"""
+    fake = _FakeAvatars(
+        {
+            "黑键": "https://cdn.example/char_1031_blackb.png",
+            "吉星": "https://cdn.example/char_2015_astgenne.png",
+            "夜莺": "https://cdn.example/char_003_pramanix.png",
+            "排班表里没有的人": "https://cdn.example/never.png",
+        }
+    )
+
+    view = webapi.roster_view(_roster_sample(), avatars=fake)
+
+    assert view["avatars"]["available"] is True
+    assert view["avatars"]["matched"] == 3
+    assert view["avatars"]["by_name"] == {
+        "黑键": "https://cdn.example/char_1031_blackb.png",
+        "吉星": "https://cdn.example/char_2015_astgenne.png",
+        "夜莺": "https://cdn.example/char_003_pramanix.png",
+    }
+    assert "排班表里没有的人" not in fake.asked, "不该去查没出现在排班表里的名字"
+
+
+def test_roster_view_avatar_lookup_is_deduped() -> None:
+    """同一名干员在多个班次重复出现时只查一次——否则 payload 白涨。"""
+    roster = _roster_sample()
+    roster["shifts"][1]["rooms"][0]["operators"] = ["黑键"]
+    fake = _FakeAvatars({"黑键": "https://cdn.example/blackb.png"})
+
+    view = webapi.roster_view(roster, avatars=fake)
+
+    assert fake.asked.count("黑键") == 1
+    assert view["avatars"]["matched"] == 1
+
+
+def test_roster_view_avatar_miss_leaves_name_out() -> None:
+    """没映射到的干员就不出现在 by_name 里——页面据此显示首字色块。"""
+    fake = _FakeAvatars({"黑键": "https://cdn.example/blackb.png"})
+
+    view = webapi.roster_view(_roster_sample(), avatars=fake)
+
+    assert "吉星" not in view["avatars"]["by_name"]
+    assert "夜莺" not in view["avatars"]["by_name"]
+
+
+def test_roster_view_skipped_rooms_still_get_avatars() -> None:
+    """「不动」的房间**在页面上照常显示**，所以它的干员也要有头像。"""
+    fake = _FakeAvatars({"夜莺": "https://cdn.example/pramanix.png"})
+
+    view = webapi.roster_view(_roster_sample(), avatars=fake)
+
+    assert view["avatars"]["by_name"]["夜莺"] == "https://cdn.example/pramanix.png"

@@ -255,6 +255,20 @@ let suggestedHours = null;
  */
 let selectedShiftIndex = 0;
 
+/**
+ * 用户是否手动点过班次标签。
+ *
+ * 为什么需要它：页面每隔一会儿轮询一次状态。如果每次都把选中项拽回「当前班次」，
+ * 用户刚点到第二班看一眼、下一轮刷新就被弹走——那比不默认还烦人。
+ */
+let shiftIndexPinned = false;
+
+/**
+ * 上一次看到的排班表「身份」。导入新表时用它判断「这是新数据」，
+ * 从而重新套用默认选中并清掉上一次的手动选择。
+ */
+let lastRosterIdentity = null;
+
 /** 最近一次成功渲染的 roster view；切换班次时直接重渲染，不必再请求接口。 */
 let lastRosterView = null;
 
@@ -676,12 +690,103 @@ function roomInitial(label) {
   return text ? text.slice(0, 1) : "房";
 }
 
-/** 一个干员名 → 紧凑标签块。 */
-function operatorChip(name) {
+/** 干员名 → 首字，用作没有头像时的回退色块。 */
+function operatorInitial(name) {
+  const text = String(name || "").trim();
+  return text ? text.slice(0, 1) : "干";
+}
+
+/**
+ * 一个干员 → 紧凑标签块：头像（可选）+ 名字。
+ *
+ * 三条设计约束：
+ *
+ * 1. **名字永远显示**，头像只是补充。头像是外链，断网/图源挂掉/没映射时都会取不到，
+ *    而那时用户更需要知道「这是谁」。
+ * 2. **回退是纯本地的**：首字色块只取名字的第一个字，不依赖任何网络，所以断网时
+ *    页面不会变空、也不会变丑（项目宪法：失败要显式，但不能变成不可用）。
+ * 3. `loading="lazy"`：一班几十个头像，别让首屏等它。
+ *
+ * @param {string} name  干员名
+ * @param {string|undefined} avatarUrl  服务端给的外链地址；没有就只用首字色块
+ */
+function operatorChip(name, avatarUrl) {
   const chip = document.createElement("span");
   chip.className = "op";
-  chip.textContent = name;
+
+  const fallback = document.createElement("span");
+  fallback.className = "op-initial";
+  fallback.setAttribute("aria-hidden", "true");
+  fallback.textContent = operatorInitial(name);
+
+  if (avatarUrl) {
+    const img = document.createElement("img");
+    img.className = "op-avatar";
+    img.src = avatarUrl;
+    // 空 alt：名字就在旁边，让读屏软件再念一遍头像是噪音。
+    img.alt = "";
+    img.loading = "lazy";
+    img.decoding = "async";
+    // 图片取不到就把 <img> 撤掉、放开首字色块——**同步可用、不依赖网络**。
+    img.addEventListener(
+      "error",
+      () => {
+        img.remove();
+        chip.classList.remove("has-avatar");
+      },
+      { once: true },
+    );
+    chip.classList.add("has-avatar");
+    chip.append(img);
+  }
+
+  chip.append(fallback);
+
+  const label = document.createElement("span");
+  label.className = "op-name";
+  label.textContent = name;
+  chip.append(label);
   return chip;
+}
+
+/**
+ * 决定这次渲染应该选中哪一班。
+ *
+ * 抽成纯函数是为了**能真的验证它**：这条规则一旦出错，表现是「用户被莫名弹到别的
+ * 班次」，在页面上很难复现。光靠肉眼看是测不到边界的。
+ *
+ * 职责划分（**一个概念只有一个家**）：
+ *
+ * - 「用户有没有手动点过」「这份排班表是不是新的」是**调用点的状态**（那里才知道
+ *   `lastRosterIdentity`，也才该在换表时清掉手动选择）；
+ * - 本函数只负责把「新表还是一样 + 上次选中的 + 服务端给的当前班次」映射成下标。
+ *   这样就不会出现「同一条规则被两处各管一半」——那正是班次顺序错位那类 bug 的温床。
+ *
+ * 三条规则，按优先级：
+ *
+ * 1. 班次为空 → 0（页面得能渲染，即便数据残缺）。
+ * 2. **新排班表** → 选中服务端算出的「当前班次」；它不可用时退回 0。
+ * 3. 否则（轮询刷新、用户点过）→ **保持原选择**。轮询每隔一会儿跑一次，每次都拽回
+ *    当前班次的话，用户刚点开第二班看一眼就被弹走，比不默认还烦人。
+ *
+ * @param {object} state
+ * @param {boolean} state.isNewRoster  这份排班表是不是刚看到的（新导入/首次加载）
+ * @param {number}  state.previous     上一次选中的下标（同一份排班表内）
+ * @param {number}  state.currentSlot  服务端算出的当前班次下标
+ * @param {number}  state.shiftCount   班次数量
+ * @returns {number} 应选中的下标（必定落在 [0, shiftCount-1]）
+ */
+export function resolveSelectedSlot({ isNewRoster, previous, currentSlot, shiftCount }) {
+  if (!Number.isInteger(shiftCount) || shiftCount <= 0) {
+    return 0;
+  }
+  let index = isNewRoster ? (Number.isInteger(currentSlot) ? currentSlot : 0) : previous;
+  if (!Number.isInteger(index)) {
+    // previous 可能是 undefined/NaN（例如上一次渲染没有班次）——退回 0 而不是
+    // 让 Math.min 产出 NaN，那会让 tabs 全都不是 active。
+    index = 0;
+  }
+  return Math.max(0, Math.min(index, shiftCount - 1));
 }
 
 /**
@@ -756,6 +861,8 @@ function selectShift(index) {
     return;
   }
   selectedShiftIndex = index;
+  // 用户自己选过之后就别再被轮询拽回「当前班次」了。
+  shiftIndexPinned = true;
   if (lastRosterView) {
     renderRoster(lastRosterView);
   }
@@ -776,6 +883,9 @@ function renderRoster(view) {
 
   if (!view || view.imported !== true) {
     suggestedHours = null;
+    // 回到「没有排班表」状态：清掉身份，这样下次导入会被当成新数据、重新套用默认选中。
+    lastRosterIdentity = null;
+    shiftIndexPinned = false;
     renderDurationSuggestion(null);
     const p = document.createElement("p");
     p.className = "muted";
@@ -832,12 +942,33 @@ function renderRoster(view) {
   // 用户的原话是「点击第一班时，点击第二班时」——一页摊开三班 40 多间房，
   // 眼睛根本没法看。所以这里做成分段控件，一次只渲染选中的那一班。
   const shifts = view.shifts || [];
-  if (shifts.length > 0) {
-    selectedShiftIndex = Math.max(0, Math.min(selectedShiftIndex, shifts.length - 1));
+
+  // 「当前班次是哪一班」由服务端算（它才知道配置顺序与时刻），页面只负责选中它。
+  // 导入新表时重新套用默认并清掉上一次的手动选择；轮询刷新时**不动**用户的选择，
+  // 否则用户看到一半就被拽走。
+  const identity = `${view.imported_at || ""}|${view.shift_count || 0}`;
+  const isNewRoster = identity !== lastRosterIdentity;
+  if (isNewRoster) {
+    lastRosterIdentity = identity;
+    // 换了排班表：上一份上的手动选择不作数了（否则会把「用户在旧表里点过第二班」
+    // 当成「在新表里也点过」，默认选中就再也不会生效）。
+    shiftIndexPinned = false;
   }
+
+  selectedShiftIndex = resolveSelectedSlot({
+    isNewRoster,
+    previous: selectedShiftIndex,
+    currentSlot: view.current_slot,
+    shiftCount: shifts.length,
+  });
+
   if (shifts.length > 1) {
     host.append(buildShiftTabs(shifts, view));
   }
+
+  // 干员头像：服务端只发「这一份排班表里出现过的名字」，且发的是完整 URL
+  // （模板留在服务端，图源只有一个定义处）。取不到就退回首字色块。
+  const avatarByNames = (view.avatars && view.avatars.by_name) || {};
 
   // --- 逐班：按房型成块（只渲染选中的那一班） ---------------------------------
   shifts.forEach((shift, shiftIndex) => {
@@ -916,7 +1047,7 @@ function renderRoster(view) {
           none.textContent = "（空）";
           ops.append(none);
         } else {
-          names.forEach((name) => ops.append(operatorChip(name)));
+          names.forEach((name) => ops.append(operatorChip(name, avatarByNames[name])));
         }
         row.append(ops);
 

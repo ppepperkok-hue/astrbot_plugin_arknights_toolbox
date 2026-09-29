@@ -11,7 +11,7 @@
 
 import base64
 import binascii
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
@@ -31,6 +31,19 @@ class SendRecordLike(Protocol):
     shift: str
     ok: bool
     detail: str
+
+
+class AvatarLookupLike(Protocol):
+    """头像查表的最小能力（``avatars.AvatarIndex`` 结构上直接匹配）。
+
+    与 :class:`SendRecordLike` 同理：只声明用得到的那一个方法，webapi 不必 import
+    具体实现，测试里传个假对象即可。声明的就是页面真正要的那件事——**给一批干员名
+    换一批 URL**，只保留查得到的；标量查询（``url_for``）是索引自己的内部细节。
+    """
+
+    def url_map(self, names: Iterable[str]) -> dict[str, str]:
+        """给一批干员名建立 ``名字 → URL`` 表，只含有映射的那些。"""
+        ...
 
 
 def format_remaining(delta: timedelta) -> str:
@@ -89,6 +102,42 @@ def order_shifts(
     if len(ordered) != len(items):
         return items
     return ordered
+
+
+def current_shift_slot(
+    current_name: str | None,
+    shift_order: Sequence[str] | None,
+    shifts: Sequence[Mapping[str, Any]],
+) -> int:
+    """算出页面应**默认选中**的班次下标（0 起）——通常是「当前正在进行的那一班」。
+
+    为什么需要映射而不是直接比名字：排班表里的班次名来自**文件**（``Shift 1 · 12h``），
+    而「当前是哪一班」来自**用户配置**（``早班``）——两个来源、名字对不上。中间那层
+    对应关系项目里已经有了，就是 ``shift_order``（配置顺序）→ ``plan_index``
+    （``_shift_order.index(name) + 1``，见 ``module.py`` 的 _roster_extra）。
+    **这里复用同一套，不另造一份**：这个项目已经因为班次顺序错位栽过两次。
+
+    对不上时**老实退回 0**（选第一个班），不报错、不猜：排班表换了、配置改了、
+    名字被改过都会走到这里，而「显示第一个班」永远是个安全答案。
+
+    Args:
+        current_name: 当前班次的名称（来自配置与时刻计算）。
+        shift_order: 配置里 ``shift_1/2/3`` 的名称顺序。
+        shifts: :func:`roster_view` 产出的班次序列（每项含 ``plan_index``）。
+
+    Returns:
+        应选中的下标；无法确定时为 0。
+    """
+    if not current_name or not shift_order:
+        return 0
+    try:
+        plan_index = list(shift_order).index(current_name) + 1
+    except ValueError:
+        return 0
+    for position, shift in enumerate(shifts):
+        if shift.get("plan_index") == plan_index:
+            return position
+    return 0
 
 
 def record_brief(record: SendRecordLike) -> dict[str, Any]:
@@ -253,7 +302,29 @@ def group_rooms(rooms: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return groups
 
 
-def roster_view(roster: Mapping[str, Any] | None) -> dict[str, Any]:
+def _avatar_block(avatars: AvatarLookupLike | None, names: Sequence[str]) -> dict[str, Any]:
+    """组装页面用的头像查表块。
+
+    **只发名单里用得到的名字**（不是把 400 多条映射整份发过去），而且发的是**完整
+    URL**——模板留在服务端，前端不做字符串拼接，图源就只有一个定义处。
+
+    ``available`` 表示「映射表有没有装载成功」，``matched`` 表示「这一份排班表里有
+    几个名字真的查到了」。两个数分开报：都为零时，用户至少能看出是映射没装还是
+    这一班恰好都是没有头像的干员。
+    """
+    if avatars is None:
+        return {"available": False, "matched": 0, "by_name": {}}
+    by_name = avatars.url_map(names)
+    return {"available": True, "matched": len(by_name), "by_name": by_name}
+
+
+def roster_view(
+    roster: Mapping[str, Any] | None,
+    *,
+    current_shift: str | None = None,
+    shift_order: Sequence[str] | None = None,
+    avatars: AvatarLookupLike | None = None,
+) -> dict[str, Any]:
     """把落盘的排班表转成页面展示结构（纯逻辑，不读文件、不调时间）。
 
     未导入、形状不对、或结构不完整时返回 ``{"imported": False}``——页面据此显示
@@ -261,6 +332,11 @@ def roster_view(roster: Mapping[str, Any] | None) -> dict[str, Any]:
 
     Args:
         roster: ``JsonStateStore`` 里 ``imported_roster`` 键的值，或 None。
+        current_shift: 当前班次的名字（来自配置与时刻计算）；用于算出页面默认
+            应该选中哪一班。对不上时退回第一班，见 :func:`current_shift_slot`。
+        shift_order: 配置里 ``shift_1/2/3`` 的名称顺序——**必须传配置的原始顺序**，
+            不是 ``ShiftTable.shifts``（后者按开始时刻排过，夜班 02:00 会跑到最前）。
+        avatars: 头像查表；None 表示映射不可用，页面走中文首字色块回退。
 
     Returns:
         可 JSON 序列化的 dict。已导入时含 ``source`` / ``imported_at`` /
@@ -270,11 +346,19 @@ def roster_view(roster: Mapping[str, Any] | None) -> dict[str, Any]:
         **这不是配置，点了才生效**（裁决见 `docs/implementation/implementation.md` §2.6）。
     """
     if not isinstance(roster, Mapping):
-        return {"imported": False}
+        return {
+            "imported": False,
+            "current_slot": 0,
+            "avatars": _avatar_block(avatars, ()),
+        }
 
     shifts_raw = roster.get("shifts")
     if not isinstance(shifts_raw, Sequence) or isinstance(shifts_raw, (str, bytes)):
-        return {"imported": False}
+        return {
+            "imported": False,
+            "current_slot": 0,
+            "avatars": _avatar_block(avatars, ()),
+        }
 
     shifts: list[dict[str, Any]] = []
     skipped_total = 0
@@ -315,12 +399,24 @@ def roster_view(roster: Mapping[str, Any] | None) -> dict[str, Any]:
     total_rooms = sum(shift["room_count"] for shift in shifts)
     total_operators = sum(shift["operator_count"] for shift in shifts)
 
+    # 头像只查这一份排班表里出现过的名字，**并且去重**：同一名干员常常三个班都上，
+    # 不去重就会把同一个查询做三遍（payload 不变，白做的事也是浪费）。
+    # 用 dict.fromkeys 保序去重，输出顺序因此是稳定的。
+    used_names = list(
+        dict.fromkeys(
+            name for shift in shifts for room in shift["rooms"] for name in room["operators"]
+        )
+    )
+
     return {
         "imported": True,
         "source": str(roster.get("source", "")),
         "imported_at": str(roster.get("imported_at", "")),
         "shift_count": len(shifts),
         "skipped_total": skipped_total,
+        # 页面默认选中哪一班：算不出就退回 0（见 current_shift_slot）。
+        "current_slot": current_shift_slot(current_shift, shift_order, shifts),
+        "avatars": _avatar_block(avatars, used_names),
         # 顶部汇总用：让用户一眼看出「这套布局有多大」。
         "total_rooms": total_rooms,
         "total_operators": total_operators,
