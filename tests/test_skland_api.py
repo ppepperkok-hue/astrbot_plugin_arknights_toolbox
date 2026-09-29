@@ -303,7 +303,7 @@ def test_health_check_never_uses_auth_refresh() -> None:
 
     def handler(method, url, headers, body):  # noqa: ANN001
         urls.append(url)
-        return _json_response({"code": 0, "data": {"uid": "1"}})
+        return _json_response(_binding_payload())
 
     client = _client(handler, cred="c", token="t")
     client.health_check()
@@ -314,14 +314,94 @@ def test_health_check_never_uses_auth_refresh() -> None:
     assert all("game/player/binding" in url for url in urls)
 
 
-def test_binding_uid_reads_flat_and_nested_shapes() -> None:
-    for payload in (
-        {"code": 0, "data": {"uid": "u-1"}},
-        {"code": 0, "data": {"bindingList": [{"uid": "u-1"}]}},
-        {"code": 0, "data": {"list": [{"uid": "u-1"}]}},
-    ):
-        client = _client(lambda *a, _p=payload, **k: _json_response(_p), cred="c", token="t")
-        assert client.binding_uid() == "u-1"
+def _binding_payload(
+    *,
+    apps: list[dict[str, object]] | None = None,
+    data: object = None,
+) -> dict[str, object]:
+    """`game/player/binding` 的**真实成功响应形状**（`code=0`）。
+
+    结构出处：四条参考实现一致（`Morizero1125` MIT、`Siq5005` MIT、`qihang518887`、
+    `Azincc`），逐条见 `docs/project-plan/07-skland-api.md` §15。
+    这里默认造一个**同时绑了终末地与方舟**的账号——因为"取错 app"正是这个接口最
+    容易犯的错（拿终末地的 uid 去查方舟，服务端只会回一个含糊的参数错误）。
+    """
+    if data is not None:
+        return {"code": 0, "data": data}
+    if apps is None:
+        apps = [
+            {"appCode": "endfield", "bindingList": [{"uid": "9999-endfield"}]},
+            {
+                "appCode": "arknights",
+                "defaultUid": "1101234567",
+                "bindingList": [
+                    {"uid": "1101234567", "nickName": "大号", "channelMasterId": "1"},
+                    {"uid": "2207654321", "nickName": "小号"},
+                ],
+            },
+        ]
+    return {"code": 0, "data": {"list": apps}}
+
+
+def test_binding_uid_reads_the_real_three_level_shape() -> None:
+    """真结构是**三层**：`data.list[].bindingList[].uid`。
+
+    ⚠️ 这条替换了原先的 `test_binding_uid_reads_flat_and_nested_shapes`。
+    那条钉的是 `data.uid` / `data.bindingList[].uid` / `data.list[].uid` 三个形状——
+    **它们全都没有任何证据，是照着直觉猜的**，而真机上没有一个命中
+    （2026-09-29：登录五步全过后，健康检查报「绑定信息里没有 uid」）。
+    留着它等于继续钉住错误假设，所以删掉重写。
+    """
+    client = _client(lambda *a, **k: _json_response(_binding_payload()), cred="c", token="t")
+    assert client.binding_uid() == "1101234567"
+
+
+def test_binding_uid_ignores_other_games() -> None:
+    """按 `appCode == "arknights"` 过滤——取错游戏会拿别家的 uid 去查方舟。"""
+    payload = _binding_payload(
+        apps=[
+            {"appCode": "endfield", "defaultUid": "END-1"},
+            {"appCode": "arknights", "bindingList": [{"uid": "ARK-1"}]},
+        ]
+    )
+    client = _client(lambda *a, **k: _json_response(payload), cred="c", token="t")
+    assert client.binding_uid() == "ARK-1"
+
+
+def test_binding_uid_prefers_default_uid_then_first_role() -> None:
+    """`defaultUid` 优先；缺了就退到 `bindingList[0].uid`（与参考实现同序）。"""
+    with_default = _binding_payload(
+        apps=[
+            {
+                "appCode": "arknights",
+                "defaultUid": "DEFAULT-1",
+                "bindingList": [{"uid": "ROLE-1"}],
+            }
+        ]
+    )
+    without_default = _binding_payload(
+        apps=[{"appCode": "arknights", "bindingList": [{"uid": "ROLE-1"}]}]
+    )
+    empty_binding_list = _binding_payload(
+        apps=[{"appCode": "arknights", "defaultUid": "DEFAULT-1", "bindingList": []}]
+    )
+
+    def uid_of(payload: dict[str, object]) -> str:
+        client = _client(lambda *a, **k: _json_response(payload), cred="c", token="t")
+        return client.binding_uid()
+
+    assert uid_of(with_default) == "DEFAULT-1"
+    assert uid_of(without_default) == "ROLE-1"
+    assert uid_of(empty_binding_list) == "DEFAULT-1"
+
+
+def test_binding_uid_accepts_a_numeric_uid() -> None:
+    """uid 从 JSON 出来可能是数字（Go 侧字段声明决定），两种都当合法标识。"""
+    payload = _binding_payload(
+        apps=[{"appCode": "arknights", "bindingList": [{"uid": 1101234567}]}]
+    )
+    client = _client(lambda *a, **k: _json_response(payload), cred="c", token="t")
+    assert client.binding_uid() == "1101234567"
 
 
 def test_binding_uid_raises_instead_of_returning_empty() -> None:
@@ -329,6 +409,81 @@ def test_binding_uid_raises_instead_of_returning_empty() -> None:
     client = _client(lambda *a, **k: _json_response({"code": 0, "data": {}}), cred="c", token="t")
     with pytest.raises(api.SklandError, match="uid"):
         client.binding_uid()
+
+
+def test_binding_uid_failure_says_which_apps_were_seen() -> None:
+    """失败必须能分辨两种情形：**结构没认出来** vs **这个账号没绑方舟**。
+
+    两者的下一步动作完全不同（后者该去森空岛 App 里绑定），而原先只说「没有 uid」，
+    把两件事混成一件——用户只能再扫一次码去试。
+    """
+    only_endfield = _binding_payload(apps=[{"appCode": "endfield", "defaultUid": "E-1"}])
+    unrecognised = {"code": 0, "data": {"somethingElse": []}}
+
+    def failure_of(payload: dict[str, object]) -> str:
+        client = _client(lambda *a, **k: _json_response(payload), cred="c", token="t")
+        with pytest.raises(api.SklandError) as caught:
+            client.binding_uid()
+        return str(caught.value)
+
+    endfield_text = failure_of(only_endfield)
+    assert "看到的应用：endfield" in endfield_text, "要说清看到的是哪个应用"
+    assert "响应结构：" in endfield_text, "结构要跟着带出来，否则下次还得盲试"
+
+    other_text = failure_of(unrecognised)
+    assert "没有看到 appCode" in other_text
+    assert "somethingElse" in other_text
+
+
+def test_describe_structure_never_renders_any_value() -> None:
+    """形状渲染器**结构上不可能泄露值**——它只输出键名、类型与长度。
+
+    这条是护栏：`game/player/binding` 的响应里没有 token，但有 `uid` / `nickName`
+    这类个人数据，而「哪些键算敏感」会随接口变。不渲染值，就不必跟着变。
+    """
+    secret = "SUPER-SECRET-TOKEN-1234567890"
+    payload = _binding_payload(
+        apps=[
+            {
+                "appCode": "arknights",
+                "cred": secret,
+                "token": secret,
+                "nickName": "某人的昵称",
+                "bindingList": [{"uid": "1101234567", "cred": secret}],
+            }
+        ]
+    )
+
+    text = api.describe_structure(payload)
+
+    assert secret not in text
+    assert "某人的昵称" not in text
+    assert "1101234567" not in text
+    # 但形状必须在，否则这个诊断没有意义
+    assert "appCode" in text
+    assert "bindingList" in text
+    assert "str(len=" in text
+
+
+def test_describe_structure_reports_nesting_and_counts() -> None:
+    """要点：**能看出少了一层**，而且钻得够深——真正的 `uid` 在第三层。
+
+    真机那次就是少一层的形状：我们去找 `data.uid` / `data.bindingList[]` /
+    `data.list[].uid`，而真实位置是 `data.list[].bindingList[].uid`。
+    形状摘要如果停在第二层，这个诊断本身就看不见问题。
+    """
+    text = api.describe_structure(_binding_payload())
+    assert "list=列表[" in text
+    assert "appCode" in text
+    assert "bindingList" in text
+    assert "defaultUid" in text
+    assert "uid" in text, "必须钻到 bindingList 里面，否则看不出 uid 在哪一层"
+
+
+def test_describe_structure_reports_list_counts_beyond_the_shown_items() -> None:
+    """超出展示上限时要报**总项数**——否则会以为已经看全了整棵树。"""
+    text = api.describe_structure({"data": {"list": [{"a": 1}, {"b": 2}, {"c": 3}]}})
+    assert "共 3 项" in text
 
 
 # --- 限流与缓存 -------------------------------------------------------------

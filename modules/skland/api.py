@@ -28,6 +28,24 @@
 所以只有一次真实授权能证。`/ak skland check` 就是那个探针——签名错了会回
 10001/10000 而不是 10002。
 
+## 绑定信息是三层结构（四条参考实现一致，真机踩过一次）
+
+`GET game/player/binding` 的**成功**响应（`code=0`）里，uid **不在** `data.uid`，
+也不在 `data.bindingList[]`，而在**第三层**：:
+
+    data.list[]          每个元素是一个 app
+      appCode            "arknights" / "endfield" …
+      defaultUid         该 app 的默认 uid（可能缺）
+      bindingList[]      该 app 下的角色
+        uid              ← 角色 uid 在这里
+
+真机第一次拿到成功响应时我们报「绑定信息里没有 uid（响应结构与预期不符）」——
+因为原实现只试了 `data.uid` / `data.bindingList[].uid` / `data.list[].uid`，
+**每一个都少一层**。逐条出处与比对见 `docs/project-plan/07-skland-api.md` §15。
+
+**按 `appCode == "arknights"` 过滤**：一个森空岛账号可同时绑多个游戏，
+取错了会拿终末地的 uid 去查方舟（服务端只会回一个含糊的参数错误）。
+
 ## 不做的
 
 - 不实现 `dId` 设备指纹（那要打第三方指纹服务并嵌死伪造数据块；生成它还需要
@@ -54,6 +72,7 @@ from typing import Any, Final, Protocol
 
 __all__ = [
     "APP_CODE_SKLAND",
+    "BINDING_APP_ARKNIGHTS",
     "HONEST_USER_AGENT",
     "HYPERGRYPH_BASE",
     "ZONAI_BASE",
@@ -67,6 +86,9 @@ __all__ = [
     "SklandRateLimited",
     "SklandTransportError",
     "SklandUnauthorized",
+    "arknights_uid",
+    "binding_app_codes",
+    "describe_structure",
     "sign_headers",
 ]
 
@@ -321,6 +343,152 @@ def describe_request_shape(body: Any = None, *, content_type: Any = None) -> str
     return "；".join(parts)
 
 
+#: 结构摘要的长度上限。它会同时出现在日志与 QQ 回执里（本项目约定二者同文案），
+#: 太长会把回执淹掉。超长时截断**并明说截断**——静默截断会让人以为看全了。
+_STRUCTURE_MAX_CHARS: Final[int] = 480
+
+
+def describe_structure(
+    value: Any = None, *, max_depth: int = 5, max_items: int = 2, max_keys: int = 10
+) -> str:
+    """把一段 JSON 渲染成**只有形状**的摘要：键名、类型、长度——**绝不含任何值**。
+
+    与 :func:`describe_request_shape` 的分工：那个描述**我们发出去的**请求体，
+    一层就够（要证明的是「值非空」）；这个描述**服务端发回来的**嵌套结构，
+    必须往下钻——真机那次失败正是栽在「少了一层嵌套」上（见 `07-skland-api.md` §15）。
+
+    **为什么是「永不渲染值」而不是「按凭据键名脱敏」**：前者**结构上不可能泄露**。
+    `game/player/binding` 的响应里没有 token，但有 `uid` / `nickName` 这类个人数据，
+    而「哪些键算敏感」是会随接口变的——不渲染值，就不必跟着变。
+
+    列表只渲染前 ``max_items`` 项的**形状**（去重），并报出总项数：
+    用来判断「这个 app 下面有几个角色」够用，又不至于把整棵树倒出来。
+    """
+
+    def shape(node: Any, depth: int) -> str:
+        if node is None:
+            return "null"
+        if isinstance(node, bool):
+            return "bool"
+        if isinstance(node, (int, float)):
+            return type(node).__name__
+        if isinstance(node, str):
+            return f"str(len={len(node)})"
+        if isinstance(node, Mapping):
+            keys = sorted(node, key=str)
+            if depth >= max_depth:
+                return f"对象{{{len(keys)} 键}}"
+            shown = keys[:max_keys]
+            parts = [f"{key}={shape(node[key], depth + 1)}" for key in shown]
+            if len(keys) > len(shown):
+                parts.append(f"…共 {len(keys)} 键")
+            return "{" + "、".join(parts) + "}"
+        if isinstance(node, (list, tuple)):
+            if not node:
+                return "列表(空)"
+            if depth >= max_depth:
+                return f"列表(len={len(node)})"
+            variants: list[str] = []
+            for item in node[:max_items]:
+                # 列表项**不额外消耗一层深度**：列表只是同类元素的容器，
+                # 让它算一层会让「数组套对象」凭空多一层，而这一层预算恰恰要留给
+                # `bindingList[]` 里面的字段（`uid` 就在那儿）。
+                text = shape(item, depth)
+                if text not in variants:
+                    variants.append(text)
+            tail = f"，共 {len(node)} 项" if len(node) > max_items else ""
+            return "列表[" + " | ".join(variants) + tail + "]"
+        return type(node).__name__
+
+    text = shape(value, 0)
+    if len(text) <= _STRUCTURE_MAX_CHARS:
+        return text
+    return text[:_STRUCTURE_MAX_CHARS] + "…（已截断）"
+
+
+#: `game/player/binding` 的响应里，明日方舟这一项的 `appCode`。
+#: **四条参考实现都以它过滤**（`07-skland-api.md` §15）——不是猜的。
+BINDING_APP_ARKNIGHTS: Final[str] = "arknights"
+
+
+def binding_app_codes(payload: Any) -> list[str]:
+    """响应里出现过哪些 `appCode`（按出现顺序，去重）。
+
+    `appCode` 是**协议常量**（`arknights` / `endfield` …），不是个人信息，可以进日志。
+    它的用处是把两种失败**分开说**：「结构没认出来」与「认出来了，但这个森空岛账号
+    没绑明日方舟」。这两种情况的下一步动作完全不同（后者该去森空岛 App 里绑定）。
+    """
+    if not isinstance(payload, Mapping):
+        return []
+    data = payload.get("data")
+    if not isinstance(data, Mapping):
+        return []
+    apps = data.get("list")
+    if not isinstance(apps, list):
+        return []
+    codes: list[str] = []
+    for app in apps:
+        if not isinstance(app, Mapping):
+            continue
+        code = app.get("appCode")
+        if isinstance(code, str) and code and code not in codes:
+            codes.append(code)
+    return codes
+
+
+def _identifier_text(value: Any) -> str:
+    """把 uid 这类标识统一成字符串；取不到返回空串。
+
+    接受数字是**协议现实**而不是结构猜测：uid 走 JSON 出来，Go 侧用字符串还是数字
+    取决于字段声明，两种都当作合法标识。`bool` 先挡掉（它是 `int` 的子类）。
+    """
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return ""
+    return str(value).strip()
+
+
+def arknights_uid(payload: Any) -> str | None:
+    """从 `game/player/binding` 的响应里取**明日方舟**的 uid；取不到返回 `None`。
+
+    结构（**四条参考实现一致**：`Morizero1125` MIT、`Siq5005` MIT、
+    `qihang518887`、`Azincc`；逐条出处见 `07-skland-api.md` §15）::
+
+        data.list[]          app 列表
+          appCode            "arknights"
+          defaultUid         app 级默认角色（可能缺）
+          bindingList[]      该 app 下的角色
+            uid
+
+    先看 `defaultUid`、再看 `bindingList[0].uid`——与 `Morizero1125` 的取法一致。
+
+    取不到返回 `None`，**不返回空字符串**：空串会让上层以为拿到了 uid。
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    data = payload.get("data")
+    if not isinstance(data, Mapping):
+        return None
+    apps = data.get("list")
+    if not isinstance(apps, list):
+        return None
+    for app in apps:
+        if not isinstance(app, Mapping) or app.get("appCode") != BINDING_APP_ARKNIGHTS:
+            continue
+        default_uid = _identifier_text(app.get("defaultUid"))
+        if default_uid:
+            return default_uid
+        bindings = app.get("bindingList")
+        if not isinstance(bindings, list):
+            continue
+        for binding in bindings:
+            if not isinstance(binding, Mapping):
+                continue
+            uid = _identifier_text(binding.get("uid"))
+            if uid:
+                return uid
+    return None
+
+
 @dataclass(frozen=True)
 class RawResult:
     """`_call_raw` 的结果：**响应**加上**我们实际发出的请求形状**。
@@ -541,19 +709,21 @@ class SklandClient:
         return self._call("GET", f"{ZONAI_BASE}/game/player/info?{query}")
 
     def binding_uid(self) -> str:
-        """从绑定信息里取 uid；取不到就抛——**不返回空字符串假装成功**。"""
+        """从绑定信息里取**明日方舟**的 uid；取不到就抛——**不返回空字符串假装成功**。
+
+        解析本身在纯函数 :func:`arknights_uid` 里（可脱离网络单测）。
+
+        失败时会**带上响应结构与看到过的 `appCode`**。原先只说了「没有 uid」，
+        而那句话把两件事混成了一件：**我们猜错了结构**，还是**这个账号没绑方舟**？
+        分不开就只能再扫一次码去试——一次真实授权要用户亲手操作，不该花在这种地方。
+        """
         payload = self.health_check()
-        data = payload.get("data") if isinstance(payload, Mapping) else None
-        candidates: list[Any] = []
-        if isinstance(data, Mapping):
-            candidates.append(data.get("uid"))
-            for key in ("bindingList", "list"):
-                items = data.get(key)
-                if isinstance(items, list):
-                    candidates.extend(
-                        item.get("uid") for item in items if isinstance(item, Mapping)
-                    )
-        for candidate in candidates:
-            if isinstance(candidate, str) and candidate:
-                return candidate
-        raise SklandError("绑定信息里没有 uid（响应结构与预期不符）")
+        uid = arknights_uid(payload)
+        if uid:
+            return uid
+        codes = binding_app_codes(payload)
+        seen = "、".join(codes) if codes else "没有看到 appCode"
+        raise SklandError(
+            f"绑定信息里没有明日方舟的 uid（看到的应用：{seen}）"
+            f"｜响应结构：{describe_structure(payload)}"
+        )

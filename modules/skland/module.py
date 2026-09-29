@@ -100,6 +100,21 @@ _HELP = (
 )
 
 
+def mask_uid(uid: str) -> str:
+    """把游戏角色 uid 打码后再展示：保留首尾各两位，中间省略。
+
+    **uid 不是凭据**——泄露它顶替不了任何操作（签名与 `cred` 才是凭据）。
+    但它是**个人标识**，而这条回执可能出现在群聊里（群里只有管理员能触发，
+    可回执全群可见）。所以打码：账号主人认得出，旁人拼不出来。
+
+    为什么要有这个函数：改动前这里写着「已脱敏显示长度」，**实际打的是完整 uid**——
+    文案与行为不符，属宪法 §2.6「文档如实」。这条注释就是那句文案的修正记录。
+    """
+    if len(uid) <= 4:
+        return "*" * len(uid)
+    return f"{uid[:2]}{'*' * (len(uid) - 4)}{uid[-2:]}"
+
+
 class SklandSetupError(RuntimeError):
     """本模块无法工作（数据目录准备失败等基础设施问题）。
 
@@ -306,7 +321,7 @@ class SklandModule(Module):
             return f"登录已失效，需要重新授权（{exc}）。已清除本地凭据，请发 /ak skland login。"
         except api.SklandError as exc:
             return f"连接失败：{exc}"
-        return f"连接正常（绑定 uid={uid}，已脱敏显示长度 {len(uid)}）"
+        return f"连接正常（绑定 uid={mask_uid(uid)}，共 {len(uid)} 位）"
 
     def _forget_credentials(self, why: str) -> None:
         """凭据失效时把它清掉并留痕——**不要留着一个永远失败的凭据装作还有授权**。"""

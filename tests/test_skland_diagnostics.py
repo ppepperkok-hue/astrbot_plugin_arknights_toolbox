@@ -231,7 +231,13 @@ class _StepTransport:
         if "oauth2/v2/grant" in url:
             return _ok({"code": GRANT_CODE})
         if "player/binding" in url:
-            return _response({"code": 0, "data": {"uid": "u-9"}})
+            # 真实形状是三层：data.list[].bindingList[].uid（07-skland-api.md §15）。
+            return _response(
+                {
+                    "code": 0,
+                    "data": {"list": [{"appCode": "arknights", "bindingList": [{"uid": "u-9"}]}]},
+                }
+            )
         return _response({"code": 0, "data": {"cred": CRED_VALUE, "token": FRESH_TOKEN}})
 
 
@@ -464,7 +470,13 @@ def test_scan_code_arriving_after_the_pending_state_completes_the_login(
         if "oauth2/v2/grant" in url:
             return _ok({"code": GRANT_CODE})
         if "player/binding" in url:
-            return _response({"code": 0, "data": {"uid": "u-9"}})
+            # 真实形状是三层：data.list[].bindingList[].uid（07-skland-api.md §15）。
+            return _response(
+                {
+                    "code": 0,
+                    "data": {"list": [{"appCode": "arknights", "bindingList": [{"uid": "u-9"}]}]},
+                }
+            )
         return _response({"code": 0, "data": {"cred": CRED_VALUE, "token": FRESH_TOKEN}})
 
     module, ctx = _module_with(transport, data_root)

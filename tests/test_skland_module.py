@@ -439,6 +439,52 @@ def test_authorised_state_is_reported_without_leaking_secrets(data_root: Path) -
     assert "已授权" in joined
 
 
+def test_mask_uid_keeps_ends_and_hides_the_middle() -> None:
+    """uid 打码：首尾各留两位、中间省略——账号主人认得出，旁人拼不出来。
+
+    这条护栏的存在理由：改动前那句回执写着「已脱敏显示长度」，**实际打的是完整 uid**。
+    文案与行为不符属宪法 §2.6「文档如实」，这里把正确行为钉住。
+    """
+    assert skland_module.mask_uid("1101234567") == "11******67"
+    assert skland_module.mask_uid("12345") == "12*45"
+    assert skland_module.mask_uid("1234") == "****", "太短就没法留首尾，整串打掉"
+
+
+def test_check_command_reports_the_bound_account_masked(data_root: Path) -> None:
+    """`/ak skland check` 走**真实结构**解析，回执里的 uid 必须是打码的。
+
+    用真实响应形状（`data.list[].bindingList[].uid`）——原先测试与生产代码都喂
+    `{"uid": ...}`，那是猜的，真机上不中（2026-09-29 那次「连接失败：绑定信息里
+    没有 uid」）。
+    """
+    plugin_dir = data_root / PLUGIN_NAME
+    store = JsonStateStore(plugin_dir / CREDENTIALS_FILENAME)
+    store.set("cred", "SECRET-CRED-VALUE")
+    store.set("token", "SECRET-TOKEN-VALUE")
+
+    module, ctx = SklandModule(), _FakeCtx()
+    _init(module, ctx)
+    # ⚠️ 换掉 `_client` 会把 `initialize` 从存档里载入的凭据一起丢掉，
+    # 于是 `_has_credentials()` 变假、回执变成「还没有授权」。这里显式带上。
+    module._client = api.SklandClient(
+        cred="SECRET-CRED-VALUE",
+        token="SECRET-TOKEN-VALUE",
+        transport=_FakeApi(),
+        cache=api.CachePolicy(cooldown_seconds=0),
+    )
+
+    event = _Event()
+    event.message_str = "/ak skland check"
+    assert _say(module, event) is True
+
+    joined = "\n".join(ctx.sent)
+    assert "连接正常" in joined, joined
+    assert "1101234567" not in joined, "完整 uid 不该出现在回执里"
+    assert "11******67" in joined, joined
+    assert "SECRET-CRED-VALUE" not in joined
+    assert "SECRET-TOKEN-VALUE" not in joined
+
+
 def test_stored_credential_is_valid_json_on_disk(data_root: Path) -> None:
     """落盘的是合法 JSON（原子替换由 core.storage 保证，这里验结果形状）。"""
     from core.storage import JsonStateStore
@@ -480,7 +526,12 @@ class _FakeApi:
         if "generate_cred_by_code" in url:
             return _cred_ok()
         if "player/binding" in url:
-            return _cred_ok({"uid": "u-9"})
+            # 真实形状是三层：data.list[].bindingList[].uid（07-skland-api.md §15）。
+            # 这里原先用 {"uid": ...}——那是猜的，真机上不中。
+            # uid 用一个像真实角色号的十位数，好让打码断言有意义。
+            return _cred_ok(
+                {"list": [{"appCode": "arknights", "bindingList": [{"uid": "1101234567"}]}]}
+            )
         raise AssertionError(f"没预备这个地址：{url}")
 
 

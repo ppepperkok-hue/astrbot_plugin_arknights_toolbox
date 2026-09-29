@@ -630,4 +630,136 @@ GUARD IS FALSIFIABLE AND REAL: True
 §13 与 §14 的护栏都补上了「把对方的真实行为编码进测试」这一层（一个用假传输只认 JSON，
 一个用逐字节重算钉住签名输入）。**能本地钉住的，就别留给真机。**
 
+---
+
+## 15. 绑定信息是**三层**结构，我们每一层都少找了一格（2026-09-29 第五次线上失败）
+
+### 15.1 现场：认证已经通了，坏的是形状假设
+
+签名修正（§14）之后，登录链路与认证**全部走通**——报错不再是 `10000`/401，而是：
+
+```
+连接验证：连接失败：绑定信息里没有 uid（响应结构与预期不符）
+```
+
+**这条报错本身是有信息量的**：能拿到业务数据说明**认证通过了**（否则服务端只会回
+`10000`/`10002`）。所以坏的不是凭据、也不是签名，而是**我们对响应形状的假设**。
+
+### 15.2 真实结构（**四条参考实现一致**，逐条给出处）
+
+```
+data.list[]              每个元素是一个 app
+  appCode                "arknights" / "endfield" …
+  defaultUid             该 app 的默认角色（可能缺）
+  bindingList[]          该 app 下的角色
+    uid                  ← 角色 uid 在这里
+```
+
+| 参考实现 | 许可 | 出处 | 取法 |
+| --- | --- | --- | --- |
+| `Morizero1125/astrbot_plugin_arknights_skland` | **MIT** | `main.py:209-213` | `binding['list']` 里筛 `appCode == 'arknights'` → `arknights['bindingList']` → `b['uid']` |
+| 同上 | — | `main.py:160-163` | `uid_dict[app['appCode']] = app['defaultUid']`，缺则 `app['bindingList'][0]['uid']` |
+| `Siq5005/astrbot_plugin_arknights` | **MIT** | `core_skland.py:697-707` | `(data.get("data") or {}).get("list")` → `app.get("bindingList")` → `item.get("uid")` |
+| `qihang518887/astrbot_plugin_sklandv2` | （本文件 §7 已复核） | `skland_api.py:405-427` | `response["data"]["list"]` → `item["bindingList"]` → `binding.get("uid")` |
+| `Azincc/astrbot_plugin_skland` | **无 LICENSE**，仅作旁证 | `skland_api.py:432-443` | 与上同形 |
+
+**四/四都用 `list[].bindingList[].uid`；`defaultUid` 只有 Morizero 用（1/4，作兜底）。**
+
+### 15.3 我们错在哪：三个候选路径**各少一层**
+
+原实现（`api.binding_uid`）依次试过三个位置，**每一个都不完整**：
+
+| 试过的路径 | 真实位置 | 差在哪 |
+| --- | --- | --- |
+| `data.uid` | `data.list[].bindingList[].uid` | 少了 `list[]` **和** `bindingList[]` |
+| `data.bindingList[].uid` | 同上 | 少了 `list[]` |
+| `data.list[].uid` | 同上 | 少了 `bindingList[]` |
+
+**更要紧的是**：测试 `test_binding_uid_reads_flat_and_nested_shapes` 把这三个**猜出来的**
+形状钉进了护栏，于是本地 841 条全绿、真机一个都不中。这与 §14 的
+「本地测试只钉住了我们自己的假设」是**同一个病**，只是这次错的不是取值而是**层级**。
+
+### 15.4 改成了什么
+
+1. **解析抽成纯函数** `arknights_uid(payload)` / `binding_app_codes(payload)`：不碰网络，
+   可以脱离传输层单测；`binding_uid()` 只负责发请求 + 组织错误文案。
+2. **按 `appCode == "arknights"` 过滤**：一个森空岛账号可同时绑多个游戏，取错了会拿
+   终末地的 uid 去查方舟，而服务端只会回一个含糊的参数错误。
+3. **`defaultUid` 优先、`bindingList[].uid` 兜底**（与 Morizero 同序）。
+4. **删掉三个没有证据的候选路径**——留着它们等于让错误的结构假设继续传播。
+5. **失败文案带上"看到的应用"与响应结构**（见 §15.5）：
+   ```
+   绑定信息里没有明日方舟的 uid（看到的应用：endfield）｜响应结构：{code=int、data={list=列表[…}}}
+   ```
+   这一句把两种失败分开了：**"结构没认出来"** 与 **"认出来了，但这个账号没绑方舟"**——
+   原先一律说「没有 uid」，用户只能再扫一次码去试。
+6. **替换**（不是扩充）那条钉住错误形状的测试，真实形状另起一条；
+   两处假传输的 fixture 也一并改成三层结构。
+7. **附带修正一处口径不实**：`module._do_check` 的成功回执原先写着「已脱敏显示长度」，
+   **实际打的是完整 uid**。现在打码成 `11******67`（首尾各留两位），并把措辞改成
+   `共 N 位`。理由：**uid 不是凭据**（泄露它顶替不了任何操作，签名与 `cred` 才是），
+   但它是**个人标识**，而回执可能出现在群聊里（群里只有管理员能触发，可回执全群可见）。
+
+### 15.5 新能力：形状诊断（`api.describe_structure`）
+
+只有响应摘要时，「服务端说某字段是空的/没有」有**两种相反解释**——字段真不在，
+或者**在别处**。这一层以前完全看不见，所以每次都得再扫一次码去试。现在失败时带上形状：
+
+```
+{code=int、data={list=列表[{appCode=str(len=8)、bindingList=列表[{uid=str(len=13)}]} |
+  {appCode=str(len=9)、bindingList=列表[{channelMasterId=str(len=1)、nickName=str(len=2)、
+   uid=str(len=10)} | {nickName=str(len=4)、uid=str(len=10)}]、defaultUid=str(len=10)}]}}
+```
+
+设计要点（每条都有理由，不是风格偏好）：
+
+- **"永不渲染值"而不是"按凭据键名脱敏"**：前者**结构上不可能泄露**。响应里没有 token，
+  但有 `uid` / `nickName` 这类个人数据，而「哪些键算敏感」会随接口变——不渲染值就不必跟着变。
+- **列表项不额外消耗一层深度**：列表只是同类元素的容器，让它算一层会让「数组套对象」
+  凭空多一层，而这一层预算恰恰要留给 `bindingList[]` 里面的字段（`uid` 就在那儿）。
+  第一版就是栽在这里——形状停在第 2 层，**诊断本身看不见问题**。
+- **超出展示上限要报总项数**（`共 N 项`），静默截断会让人以为看全了。
+- 长度上限 480 字符且**截断时明说**（它会同时进日志与 QQ 回执，本项目约定二者同文案）。
+
+### 15.6 可证伪验证（注入 → 红 → 逐字节还原）
+
+注入：让 `arknights_uid` **不再往下钻 `bindingList`**（即复现"少一层"这个缺陷本身）。
+
+```
+original sha256 : f96ef853a5575ea92059cfca3f45ee4bc0d31e97b4245448afb1de1ddba1efc7
+1. guard on the FIXED tree    -> 35 passed                       exit=0
+3. guard on the BROKEN tree   -> 3 failed, 32 passed             exit=1   <- 红
+4. restored                   -> identical: True
+5. guard green again          -> 35 passed                       exit=0
+GUARD IS FALSIFIABLE AND REAL: True
+```
+
+**做这个实验时我自己踩了一个坑，记下来给后来的人**：第一版脚本用
+`pathlib.write_text()` 还原，而它在 Windows 上会把 `\n` 翻译成 `\r\n`——
+于是"逐字节还原"**实际把整个文件的行尾改掉了**（sha256 对不上，才发现）。
+改成**全程字节操作**（`read_bytes` / `write_bytes`）后还原才真正一致。
+本项目先前已经因为"用 shell 重写文本"损坏过一个文件，这是同一族问题的另一副面孔。
+
+### 15.7 顺手核查：同一模块里其它解析有没有同类问题
+
+| 解析点 | 有没有猜字段 | 结论 |
+| --- | --- | --- |
+| `binding_uid`（本包修正） | **有**，三处各少一层 | 已按四条参考实现改正，并加形状诊断 |
+| `sign_in` / `_do_signin` | **没有** | 只判 `code==0`（由请求层保证）+ `data` 非空；判据不足时回执**明说**「结构未验证，已如实记录」——**没有任何字段名假设** |
+| `player_info` | **没有** | 纯透传，**刻意不解析任何字段**（照文档猜字段名正是本项目栽过的坑） |
+
+> 顺带记一条**不属于本包范围**的观察：`player_info` 目前**只有测试在用**，
+> 模块侧还没有调用点（干员/基建那几条路由被刻意推迟到实测之后）。
+> 要不要保留这个"已实测存在、但暂未使用"的方法，属所有者取舍，本包不擅自删。
+
+### 15.8 下次真机复查要看什么
+
+1. `/ak skland check` 应当回 **「连接正常（绑定 uid=11\*\*\*\*\*\*67，共 10 位）」**——
+   那说明**绑定解析对了**，同时也就是**签名被服务端接受的最终证据**（§14.4 的未验证项）。
+2. **若仍失败**：回执现在自带「看到的应用」与「响应结构」，**把那整句发回**即可定位——
+   `看到的应用：` 里没有 `arknights` 就不是结构问题，而是**这个账号没绑方舟**。
+3. 一旦通了，签到（`/ak skland signin`）就是下一个要亲眼看的动作：
+   它的**请求方法与成功响应体仍未验证**（§9.5），失败会如实抛出，不会静默当成功。
+
+
 
