@@ -18,8 +18,8 @@
       },
       "skland": {
         "type": "bool",
-        "description": "森空岛状态（开发中）",
-        "hint": "读取森空岛的理智、干员疲劳与基建状态。需要你用手机端森空岛扫码授权，且授权会过期（about 7 天）。当前阶段只有骨架：能装载、能用 /ak skland 查看授权状态，但还不会取数。默认关闭——它需要你主动授权，不该默认开。",
+        "description": "森空岛（扫码授权 + 签到）",
+        "hint": "扫码授权后可以代你每日签到，并查询授权状态。授权会过期（社区说法约 7 天，未经证实），过期后需要重新扫码。凭据只存在插件数据目录里，不会写进日志。默认关闭——它需要你主动授权，不该默认开。",
         "default": false
       }
     }
@@ -130,6 +130,29 @@
         "description": "最多列出多少组推荐标签组合",
         "hint": "推荐的是「能保证最高星级」的极小组合；同样最优的组合很多时按这个数截断并注明还剩几组。默认 6。",
         "default": 6
+      }
+    }
+  },
+  "skland": {
+    "type": "object",
+    "description": "森空岛模块",
+    "hint": "用法：/ak skland（看状态）、/ak skland login（扫码授权）、/ak skland logout（清除授权）、/ak skland check（测一次连接）、/ak skland signin（手动签到）。签到是唯一会替你做的写操作；干员疲劳与基建状态暂未实现（那几条接口连存在性都没实测过，照文档猜路径正是本项目栽过的坑）。",
+    "default": {
+      "signin_enabled": false,
+      "signin_cron": "0 8 * * *"
+    },
+    "items": {
+      "signin_enabled": {
+        "type": "bool",
+        "description": "自动每日签到",
+        "hint": "开启后按下面的时刻自动替你签到。默认关闭：签到会在游戏里产生实际效果，属于写操作，要你明确同意才跑。",
+        "default": false
+      },
+      "signin_cron": {
+        "type": "string",
+        "description": "签到时刻（cron 表达式）",
+        "hint": "5 段 cron：分 时 日 月 周，时区固定 Asia/Shanghai。默认 0 8 * * *（每天 08:00）。例如 30 7 * * * 是 07:30。",
+        "default": "0 8 * * *"
       }
     }
   }

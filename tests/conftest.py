@@ -12,6 +12,7 @@
 副作用仅限 `sys.modules`，不落任何文件。
 """
 
+import base64
 import sys
 import types
 from pathlib import Path
@@ -39,14 +40,44 @@ def _install_astrbot_stub() -> None:
         debug = info = warning = error = exception = critical = _noop
 
     class MessageChain:
-        """最小消息链：只记住文本，够装配层调用与断言。"""
+        """最小消息链：记住各段（文本或组件），够装配层调用与断言。
 
-        def __init__(self) -> None:
-            self.parts: list[str] = []
+        可以无参构造（`MessageChain().message(text)`），也可以直接给一段组件列表
+        （`MessageChain([Plain(...), Image.fromBytes(...)])`）——后者是森空岛模块
+        发二维码用的形态。
+        """
+
+        def __init__(self, parts: Any = None) -> None:
+            self.parts: list[Any] = list(parts) if parts else []
 
         def message(self, text: str) -> "MessageChain":
             self.parts.append(text)
             return self
+
+    class Plain:
+        """够用的文本组件：只记住文本。"""
+
+        def __init__(self, text: str = "") -> None:
+            self.text = text
+
+    class Image:
+        """够用的图片组件。
+
+        形状**照真实实现**（已核实 `astrbot/core/message/components.py:501-533`）：
+        `fromBytes` 走 base64，最终 `file` 是 `base64://...`。测试据此断言，
+        不需要真的解码图片。
+        """
+
+        def __init__(self, file: str = "") -> None:
+            self.file = file
+
+        @staticmethod
+        def fromBase64(data: str) -> "Image":
+            return Image(f"base64://{data}")
+
+        @staticmethod
+        def fromBytes(data: bytes) -> "Image":
+            return Image.fromBase64(base64.b64encode(data).decode())
 
     class AstrMessageEvent:
         """够用的假事件：宿主与模块只用到这几个属性/方法。"""
@@ -140,11 +171,16 @@ def _install_astrbot_stub() -> None:
     star.Star = Star
     star.Context = Context
 
+    components = types.ModuleType("astrbot.api.message_components")
+    components.Plain = Plain
+    components.Image = Image
+
     astrbot.api = api
     astrbot.core = core
     api.event = event
     api.web = web
     api.star = star
+    api.message_components = components
     core.utils = utils
     utils.astrbot_path = astrbot_path
 
@@ -155,6 +191,7 @@ def _install_astrbot_stub() -> None:
             "astrbot.api.event": event,
             "astrbot.api.web": web,
             "astrbot.api.star": star,
+            "astrbot.api.message_components": components,
             "astrbot.core": core,
             "astrbot.core.utils": utils,
             "astrbot.core.utils.astrbot_path": astrbot_path,

@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -20,30 +21,47 @@ import modules.shift_reminder.module as shift_module
 import modules.skland.module as skland_module
 from core.registry import build_registry, discover_modules, known_module_names
 from core.storage import JsonStateStore
+from modules.skland import api
 from modules.skland.credentials import CREDENTIALS_FILENAME, CredentialState
-from modules.skland.module import PLUGIN_NAME, SklandModule, SklandSetupError
+from modules.skland.module import (
+    JOB_PREFIX,
+    PLUGIN_NAME,
+    SIGNIN_JOB_NAME,
+    SklandModule,
+    SklandSetupError,
+)
 
 
 class _FakeJob:
-    def __init__(self, job_id: str) -> None:
+    def __init__(self, job_id: str, name: str = "") -> None:
         self.job_id = job_id
+        self.name = name
 
 
 class _FakeCronManager:
-    """够用的假 cron：`shift_reminder` 装载时要用它，本模块阶段一不用。"""
+    """够用的假 cron：记录注册与删除，够断言「注册了几个、清了哪些」。"""
 
     def __init__(self) -> None:
         self.jobs: list[dict[str, Any]] = []
+        self.deleted: list[str] = []
+        self._jobs: list[_FakeJob] = []
 
-    async def list_jobs(self) -> list[Any]:
-        return []
+    def seed(self, job_id: str, name: str) -> None:
+        """预置一个历史任务，用于验证「注册前按前缀清一遍」。"""
+        self._jobs.append(_FakeJob(job_id, name))
+
+    async def list_jobs(self) -> list[_FakeJob]:
+        return list(self._jobs)
 
     async def add_basic_job(self, **kwargs: Any) -> _FakeJob:
         self.jobs.append(kwargs)
-        return _FakeJob(f"job-{len(self.jobs)}")
+        job = _FakeJob(f"job-{len(self.jobs)}", str(kwargs.get("name", "")))
+        self._jobs.append(job)
+        return job
 
     async def delete_job(self, job_id: str) -> None:
-        return None
+        self.deleted.append(job_id)
+        self._jobs = [job for job in self._jobs if job.job_id != job_id]
 
 
 class _FakeCtx:
@@ -51,6 +69,7 @@ class _FakeCtx:
 
     def __init__(self, *, ok: bool = True, raises: bool = False) -> None:
         self.sent: list[str] = []
+        self.chains: list[Any] = []
         self.attempts = 0
         self.cron_manager = _FakeCronManager()
         self._ok = ok
@@ -61,7 +80,11 @@ class _FakeCtx:
         if self._raises:
             raise RuntimeError("平台已离线")
         if self._ok:
-            self.sent.append("".join(chain.parts))
+            self.chains.append(chain)
+            # 图片组件不是字符串，用占位符表示——断言「发过一张图」即可，不必解码。
+            self.sent.append(
+                "".join(part if isinstance(part, str) else "[图片]" for part in chain.parts)
+            )
         return self._ok
 
 
@@ -90,8 +113,12 @@ def data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def _init(module: SklandModule, ctx: _FakeCtx | None = None) -> None:
-    asyncio.run(module.initialize(ctx or _FakeCtx(), {}))
+def _init(
+    module: SklandModule,
+    ctx: _FakeCtx | None = None,
+    config: Mapping[str, Any] | None = None,
+) -> None:
+    asyncio.run(module.initialize(ctx or _FakeCtx(), config or {}))
 
 
 #: `shift_reminder` 装载所需的真实配置段（`start_all` 按 `config_key` 注入，
@@ -174,7 +201,8 @@ def test_status_command_explains_missing_credentials(data_root: Path) -> None:
     assert _say(module, _Event()) is True
     text = ctx.sent[-1]
     assert "未授权" in text
-    assert "阶段二" in text
+    # 阶段二起未授权是可以自解的：必须给出具体动作，而不是一句「以后再说」。
+    assert "/ak skland login" in text
     # 用户最需要知道的那一句：核心功能没被牵连
     assert "换班提醒" in text
 
@@ -342,11 +370,55 @@ def test_terminate_is_idempotent_and_clears_references(data_root: Path) -> None:
     assert module._ctx is None
 
 
-def test_module_registers_no_cron_jobs(data_root: Path) -> None:
-    """阶段一刻意不做定时任务。这里从源码判定，防止有人顺手加一个空清理分支。"""
-    source = Path(skland_module.__file__).read_text(encoding="utf-8")
-    assert "cron_manager" not in source
-    assert "add_basic_job" not in source
+def test_signin_job_is_absent_unless_enabled(data_root: Path) -> None:
+    """签到默认**关闭**：它是写操作，要用户明确同意才该自动跑。"""
+    module, ctx = SklandModule(), _FakeCtx()
+    _init(module, ctx)
+    assert ctx.cron_manager.jobs == []
+
+
+def test_enabling_signin_registers_one_prefixed_job_and_purges_stale_ones(data_root: Path) -> None:
+    """开启后注册一个任务，且**注册前按前缀清掉历史任务**（重载会漏 terminate）。"""
+    module, ctx = SklandModule(), _FakeCtx()
+    ctx.cron_manager.seed("stale-1", f"{JOB_PREFIX}signin")
+    ctx.cron_manager.seed("other", "ak_toolbox:shift_reminder:早班")
+
+    _init(module, ctx, config={"signin_enabled": True, "signin_cron": "30 7 * * *"})
+
+    assert [job["name"] for job in ctx.cron_manager.jobs] == [SIGNIN_JOB_NAME]
+    assert ctx.cron_manager.jobs[0]["cron_expression"] == "30 7 * * *"
+    # 只清自己的前缀，别人的任务一根汗毛都不许碰
+    assert ctx.cron_manager.deleted == ["stale-1"]
+
+
+def test_disabling_signin_removes_the_job(data_root: Path) -> None:
+    """把开关关掉要**撤掉**任务，而不是留着它继续跑。"""
+    module, ctx = SklandModule(), _FakeCtx()
+    _init(module, ctx, config={"signin_enabled": True})
+    assert len(ctx.cron_manager.jobs) == 1
+
+    asyncio.run(module.apply_config({"signin_enabled": False}))
+    assert ctx.cron_manager.deleted, "关闭签到后应当删掉已注册的任务"
+    assert ctx.cron_manager._jobs == []
+
+
+def test_terminate_cancels_the_login_poll_and_cleans_jobs(data_root: Path) -> None:
+    """`terminate` 要取消扫码轮询并清掉自己的任务——重复调用安全。"""
+    module, ctx = SklandModule(), _FakeCtx()
+    _init(module, ctx, config={"signin_enabled": True})
+
+    async def _never() -> None:
+        await asyncio.sleep(3600)
+
+    async def _run() -> None:
+        module._login_task = asyncio.create_task(_never())
+        await asyncio.sleep(0)
+        await module.terminate()
+        await module.terminate()
+
+    asyncio.run(_run())
+    assert ctx.cron_manager.deleted, "terminate 应当清掉自己注册的任务"
+    assert module._login_task is None
 
 
 def test_authorised_state_is_reported_without_leaking_secrets(data_root: Path) -> None:
@@ -380,3 +452,119 @@ def test_stored_credential_is_valid_json_on_disk(data_root: Path) -> None:
 
     payload = json.loads((plugin_dir / CREDENTIALS_FILENAME).read_text(encoding="utf-8"))
     assert payload == {"cred": "c", "token": "t", "user_id": "u"}
+
+
+# --- 授权链路的端到端（假传输，不发真实请求） --------------------------------
+
+
+class _FakeApi:
+    """按 URL 给响应的假传输：把五步链路的形状照实测结果摆好。
+
+    这样能在**不联网**的前提下验证「五个请求确实按顺序发出去、并各自取对了字段」——
+    真机验证只剩「服务端认不认这个签名」这一项（见 api.py 的说明）。
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, bytes | None]] = []
+
+    def __call__(self, method: str, url: str, headers: Any, body: bytes | None) -> api.HttpResponse:
+        self.calls.append((method, url, body))
+        if "gen_scan/login" in url:
+            return _ok({"scanId": "S-1", "scanUrl": "hypergryph://scan_login?scanId=S-1"})
+        if "scan_status" in url:
+            return _ok({"msg": "已扫码", "status": 0, "data": {"scanCode": _b64("scan")}})
+        if "token_by_scan_code" in url:
+            return _ok({"token": "PASSPORT-TOKEN"})
+        if "oauth2/v2/grant" in url:
+            return _ok({"code": "GRANT-CODE"})
+        if "generate_cred_by_code" in url:
+            return _cred_ok()
+        if "player/binding" in url:
+            return _cred_ok({"uid": "u-9"})
+        raise AssertionError(f"没预备这个地址：{url}")
+
+
+def _ok(data: dict[str, Any]) -> api.HttpResponse:
+    return api.HttpResponse(status=200, body=json.dumps({"status": 0, "data": data}).encode())
+
+
+def _cred_ok(data: dict[str, Any] | None = None) -> api.HttpResponse:
+    payload = {"code": 0, "data": data or {"cred": "CRED-1", "token": "TOKEN-1"}}
+    return api.HttpResponse(status=200, body=json.dumps(payload).encode())
+
+
+def _b64(text: str) -> str:
+    import base64 as _base64
+
+    return _base64.b64encode(text.encode()).decode()
+
+
+def test_full_scan_login_chain_persists_the_credential(data_root: Path) -> None:
+    """五步链路端到端：取码 → 轮询到已扫码 → 换 token → grant → cred → 落盘 → 验证。"""
+    module, ctx = SklandModule(), _FakeCtx()
+    _init(module, ctx)
+
+    transport = _FakeApi()
+    module._client = api.SklandClient(transport=transport)
+
+    asyncio.run(module._complete_login("test:FriendMessage:1", _b64("scan")))
+
+    urls = [url for _, url, _ in transport.calls]
+    assert any("token_by_scan_code" in url for url in urls)
+    assert any("oauth2/v2/grant" in url for url in urls)
+    assert any("generate_cred_by_code" in url for url in urls)
+
+    # 凭据真的落盘了，而且**回执里不许出现它的内容**
+    stored = json.loads(
+        (data_root / PLUGIN_NAME / CREDENTIALS_FILENAME).read_text(encoding="utf-8")
+    )
+    assert stored["cred"] == "CRED-1"
+    joined = "\n".join(ctx.sent)
+    assert "CRED-1" not in joined
+    assert "TOKEN-1" not in joined
+    assert "授权成功" in joined
+
+    # 授权后立刻验一次连接（签名算法唯一的端到端探针）
+    assert "连接验证" in joined
+    assert module._client.has_credentials is True
+
+
+def test_login_chain_failure_is_reported_without_leaking_anything(data_root: Path) -> None:
+    """链路中途失败要说清「没拿到凭据」，且**不回显任何服务端字段值**。"""
+    module, ctx = SklandModule(), _FakeCtx()
+    _init(module, ctx)
+
+    def transport(method: str, url: str, headers: Any, body: bytes | None) -> api.HttpResponse:
+        if "token_by_scan_code" in url:
+            return api.HttpResponse(status=200, body=json.dumps({"status": 0, "data": {}}).encode())
+        return _ok({})
+
+    module._client = api.SklandClient(transport=transport)
+    asyncio.run(module._complete_login("test:FriendMessage:1", _b64("scan")))
+
+    joined = "\n".join(ctx.sent)
+    assert "失败" in joined
+    assert not (data_root / PLUGIN_NAME / CREDENTIALS_FILENAME).exists()
+
+
+def test_scan_login_sends_a_qr_code_image(data_root: Path) -> None:
+    """`/ak skland login` 要真的把二维码当图片发出去（不是只发链接）。"""
+    module, ctx = SklandModule(), _FakeCtx()
+    _init(module, ctx)
+
+    transport = _FakeApi()
+    module._client = api.SklandClient(transport=transport)
+
+    asyncio.run(module._cmd_login(_Event()))
+
+    assert ctx.chains, "应当发了一条消息"
+    parts = ctx.chains[0].parts
+    kinds = [type(part).__name__ for part in parts]
+    assert "Image" in kinds, f"消息里应当有图片组件，实际 {kinds}"
+    image = next(part for part in parts if type(part).__name__ == "Image")
+    assert image.file.startswith("base64://"), "图片应按 base64 传递（Image.fromBytes 的真实行为）"
+
+    # 轮询任务要被记下来，`terminate` 才取消得掉；这里立刻收尾免得留后台任务
+    assert module._login_task is not None
+    module._login_task.cancel()
+    asyncio.run(module.terminate())
