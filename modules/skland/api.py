@@ -17,9 +17,24 @@
 3. **带我们自己的 User-Agent。** 实测五种 UA（含空 UA）结果完全一致，
    所以**不需要伪装官方客户端**——这条边界守得住。
 
+## 签名：本地已比对到字节，服务端是否接受仍未验证
+
+签名是**纯函数**，所以「我们算的」与「参考实现算的」可以逐字节比对——
+`docs/project-plan/07-skland-api.md` §14 做过这件事，并因此抓到一处真缺陷：
+调用点曾把 `path` 里的 `/api/v1` 前缀剥掉，**签名整体错位**，而真机上只表现为
+「凭据无效（`code=10000`）」，错误码完全指不到真因。现在签的是**完整路径**。
+
+**但"与参考实现一致"不等于"服务端认"**：服务端对未登录请求不校验签名（§3），
+所以只有一次真实授权能证。`/ak skland check` 就是那个探针——签名错了会回
+10001/10000 而不是 10002。
+
 ## 不做的
 
-- 不实现 `dId` 设备指纹（那要打第三方指纹服务并嵌死伪造数据块）。
+- 不实现 `dId` 设备指纹（那要打第三方指纹服务并嵌死伪造数据块；生成它还需要
+  RSA+AES 运算，引第三方密码学库会破坏本项目的零运行时依赖）。
+  **代价要如实说**：三个 AstrBot 参考实现都用**非空** `dId`，我们发空串。
+  服务端必须从我们发出的头部重建被签名的 JSON（否则它无从知道客户端自选的
+  `dId`），所以空串在**签名层面**自洽；**它是否被额外校验，仍是未验证项**（§14.4）。
 - 不做任何绕过、模拟客户端、反检测。
 - 签到以外的写操作一概不做。
 """
@@ -130,7 +145,12 @@ def sign_headers(
     """按实测算法生成签名头。
 
     Args:
-        path: 由 `/api/v1` 之后开始（含 `/`），例如 `"/game/player/binding"`。
+        path: **完整的请求路径，含 `/api/v1` 前缀**，例如 `"/api/v1/game/player/binding"`。
+            这里踩过一个把签名整体弄错的坑：本模块原先按「`/api/v1` 之后开始」拼串
+            （即 `"/game/player/binding"`），而**四个参考实现与我们的调研探针全都签完整
+            路径**。签名是纯函数，差一个前缀就是另一个值——真机上表现为
+            `HTTP 401 / code=10000`（凭据无效），看起来像凭据坏了，实际是签名从未对上。
+            见 `docs/project-plan/07-skland-api.md` §14 的逐字节比对。
         query_or_body: GET 传**原始 query 串**（不含 `?`）；POST 传**实际发出的
             JSON 文本**。签名与实际发出的字节必须一致——所以这里收的是字符串，
             不是对象，免得调用方以为可以随手中转一次 `json.dumps`。
@@ -402,9 +422,11 @@ class SklandClient:
             if not self.has_credentials:
                 raise SklandUnauthorized("还没有授权，先扫码")
             parsed = urllib.parse.urlsplit(url)
-            path = (
-                parsed.path[len("/api/v1") :] if parsed.path.startswith("/api/v1") else parsed.path
-            )
+            # 签**完整的** `path`，含 `/api/v1` 前缀。**不要**剥掉前缀：
+            # 四个参考实现都签完整路径，而剥掉前缀会让签名整体错位，
+            # 真机上只表现为「凭据无效」（10000），极难从错误码反推。
+            # 逐字节比对见 docs/project-plan/07-skland-api.md §14。
+            path = parsed.path
             # GET 签原始 query；POST 签**实际发出的** JSON 文本。
             signed_part = (
                 parsed.query if method == "GET" else (payload_bytes or b"").decode("utf-8")

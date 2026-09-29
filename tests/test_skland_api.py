@@ -2,14 +2,19 @@
 
 ## 关于签名「正确性」的边界（必须说清）
 
-这里能证明的是**字节序没变**（金标把 `path+body+ts+json` 的拼接钉死），
-**不能证明服务端认这个签名**——那需要一次真实授权，而实测发现服务端对未登录请求
-根本不校验签名（`07-skland-api.md` §3）。真正验证它的地方是 `/ak skland check`：
-签名错了会回 10001/10000 而不是 10002。这条边界写进测试而不是藏着。
+这里能证明的是**字节序与签名输入的形状**（金标把 `path+body+ts+json` 的拼接钉死，
+调用点那条钉子住「`path` 必须含 `/api/v1`」），**不能证明服务端认这个签名**——
+那需要一次真实授权，而实测发现服务端对未登录请求根本不校验签名（`07-skland-api.md` §3）。
+真正验证它的地方是 `/ak skland check`：签名错了会回 10001/10000 而不是 10002。
+这条边界写进测试而不是藏着。
+
+签名输入与参考实现的逐字节比对见 `07-skland-api.md` §14。
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import urllib.parse
 
@@ -44,15 +49,20 @@ def _json_response(payload: object, status: int = 200) -> api.HttpResponse:
 
 
 def test_signature_matches_frozen_golden() -> None:
-    """字节序金标：`path + query/body + ts + json(hdr)` 的顺序不许悄悄变。"""
+    """字节序金标：`path + query/body + ts + json(hdr)` 的顺序不许悄悄变。
+
+    ⚠️ `path` 是**完整路径**（含 `/api/v1`）。这条金标值随 §14 那次修正更新过：
+    旧值 `3dd33f97…` 对应剥掉前缀的 `"/game/player/binding"`，是**错的**——
+    真机上只回「凭据无效」，见 `docs/project-plan/07-skland-api.md` §14。
+    """
     headers = api.sign_headers(
         cred="CRED-X",
         token="TOKEN-Y",
-        path="/game/player/binding",
+        path="/api/v1/game/player/binding",
         query_or_body="uid=42",
         timestamp=1700000000,
     )
-    assert headers["sign"] == "3dd33f97e658d4c7bd327c1f3e0c6965"
+    assert headers["sign"] == "c9fc6b9185c96cae0682bbd7f48aec84"
     assert headers["cred"] == "CRED-X"
     assert headers["timestamp"] == "1700000000"
     # 三个身份字段要**存在且为空串**，不是省略——实测如此
@@ -117,7 +127,7 @@ def test_signature_is_bound_to_the_actual_request_bytes() -> None:
     expected = api.sign_headers(
         cred="cred",
         token="tok",
-        path=parsed.path.removeprefix("/api/v1"),
+        path=parsed.path,  # 完整路径（含 /api/v1）——见 07-skland-api.md §14
         query_or_body=parsed.query,
         timestamp=int(headers["timestamp"]),
     )
@@ -129,11 +139,57 @@ def test_signature_is_bound_to_the_actual_request_bytes() -> None:
     expected = api.sign_headers(
         cred="cred",
         token="tok",
-        path=urllib.parse.urlsplit(url).path.removeprefix("/api/v1"),
+        path=urllib.parse.urlsplit(url).path,  # 完整路径，不剥 /api/v1
         query_or_body="",
         timestamp=int(headers["timestamp"]),
     )
     assert headers["sign"] == expected["sign"]
+
+
+def test_signed_path_keeps_the_api_v1_prefix() -> None:
+    """签名里必须带 `/api/v1` 前缀——这条钉的是**调用点**，不是 `sign_headers`。
+
+    缺陷就长在调用点：`sign_headers` 一直是好的，是它拿到了一条被剥掉前缀的
+    `path`（`/game/player/binding`），于是签名整体错位。真机表现只是
+    「凭据无效（10000）」，错误码完全指不到真因，所以这里用**逐字节重算**
+    钉住实际参与签名的那个串。
+    """
+    seen: list[tuple[str, dict, bytes | None]] = []
+
+    def handler(method, url, headers, body):  # noqa: ANN001
+        seen.append((url, dict(headers), body))
+        return _json_response({"code": 0, "data": {"list": []}})
+
+    client = _client(handler, cred="CRED-X", token="TOKEN-Y")
+    client.health_check()  # 打的就是 /api/v1/game/player/binding
+
+    url, headers, _ = seen[0]
+    assert url == "https://zonai.skland.com/api/v1/game/player/binding"
+
+    ts = int(headers["timestamp"])
+    # 与参考实现逐字节一致：完整路径 + 空 query + ts + 紧凑 JSON（空身份字段）。
+    signed = (
+        "/api/v1/game/player/binding"
+        + ""
+        + str(ts)
+        + '{"platform":"","timestamp":"'
+        + str(ts)
+        + '","dId":"","vName":""}'
+    )
+    digest = hmac.new(b"TOKEN-Y", signed.encode(), hashlib.sha256).hexdigest()
+    assert headers["sign"] == hashlib.md5(digest.encode()).hexdigest()
+
+    # 反过来钉一次：若有人把前缀剥掉，重算值必然不同（防止"改回去也通过"）。
+    stripped = (
+        "/game/player/binding"
+        + ""
+        + str(ts)
+        + '{"platform":"","timestamp":"'
+        + str(ts)
+        + '","dId":"","vName":""}'
+    )
+    stripped_digest = hmac.new(b"TOKEN-Y", stripped.encode(), hashlib.sha256).hexdigest()
+    assert headers["sign"] != hashlib.md5(stripped_digest.encode()).hexdigest()
 
 
 def test_post_with_a_body_signs_the_exact_json_text() -> None:
