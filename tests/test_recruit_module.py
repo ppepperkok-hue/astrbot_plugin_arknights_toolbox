@@ -159,14 +159,22 @@ def test_unknown_subcommand_is_left_to_other_modules() -> None:
     assert ctx.sent == []
 
 
-def test_group_command_is_refused_for_non_admin() -> None:
+def test_group_command_is_allowed_for_a_plain_member() -> None:
+    """公开招募**刻意不做会话门禁**：它只读、无状态、不碰绑定。
+
+    原先它沿用了「绑定」那条群聊限制（群里只有管理员能用），属于**限制错了
+    对象**——2026-09-29 发布前审查的 S7。实测场景是：用户把机器人拉进群，发一条
+    `/ak recruit 输出 近战位`，收到「只有管理员能查公开招募」，于是以为功能坏了。
+    这条用例钉住「群聊里普通成员也能用」，防止有人把门禁加回来。
+    """
     ctx = _FakeCtx()
     module = _ready_module(ctx)
 
     _say_group(module, _Event("ak recruit 输出", group=True))
 
     assert len(ctx.sent) == 1
-    assert "管理员" in ctx.sent[0]
+    assert "管理员" not in ctx.sent[0]
+    assert "候选" in ctx.sent[0]
 
 
 def test_group_command_is_allowed_for_admin() -> None:

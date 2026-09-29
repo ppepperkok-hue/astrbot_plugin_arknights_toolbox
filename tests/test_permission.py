@@ -66,9 +66,13 @@ def test_rejection_mentions_the_module_action() -> None:
 
     这正是把 `action` 做成参数（而不是写死一句「权限不足」）的意义：
     同一个会话里可能有好几个模块的指令，笼统的拒绝理由帮不上忙。
+
+    例子用的是**仍然受限**的动作。`recruit`（公开招募）曾经拿它举过例，但那个
+    模块现在刻意不做门禁（见 `docs/implementation/pre-release-audit.md` S7），
+    再拿它举例会让人以为公招在群里也受限。
     """
-    _, reason = session_allowed(**GROUP_MEMBER, action="查公开招募")
-    assert "查公开招募" in reason
+    _, reason = session_allowed(**GROUP_MEMBER, action="操作换班提醒")
+    assert "操作换班提醒" in reason
 
 
 def test_group_admin_is_the_only_difference() -> None:

@@ -65,6 +65,10 @@ class ArknightsToolbox(Star):
         super().__init__(context, config)
         self._config: Mapping[str, Any] = config if isinstance(config, Mapping) else {}
         self._registry: ModuleRegistry | None = None
+        #: 磁盘上**存在**的模块名（与是否开启无关）。只用于 `/ak` 兜底时区分
+        #: 「这个功能存在但没开」与「压根没有这个功能」——两者对用户的下一步
+        #: 完全不同，而宿主只凭注册表分不出来（没开的模块不在注册表里）。
+        self._known_module_names: tuple[str, ...] = ()
         self._register_config_api(context)
 
     async def initialize(self) -> None:
@@ -84,7 +88,9 @@ class ArknightsToolbox(Star):
         # 自动发现 modules/ 下的模块包。宿主**不认识任何具体功能**（架构红线，
         # 见 docs/architecture/scope.md §2）：新增模块只需往 modules/ 加一个子包。
         # 发现阶段出问题要当场抛，绝不静默少装一个模块。
-        discover_modules()
+        #
+        # 返回值同时记下来：兜底回复要靠它区分「存在但没开启」与「没有这个功能」。
+        self._known_module_names = tuple(sorted(discover_modules()))
         # 未知模块名在这一步就抛错，此时还没有任何模块被启动，无需回滚
         registry = build_registry(read_module_switches(self._config))
         try:
@@ -168,11 +174,22 @@ class ArknightsToolbox(Star):
         #
         # 「已装载但不可用」与「启动失败」分开列：前者能应答指令、还能告诉他怎么修
         # （例如把数据文件放回去），后者压根没起来。两种情况的处置完全不同。
+        #
+        # 还要处理第三种、也是最常见的一种：他打的是一个**存在但没开启**的功能
+        # （照着说明发 `/ak maa`，却忘了先开开关）。原先只会回「未知子命令」，
+        # 那句话让他完全想不到要去配置里打开什么。宿主不知道具体功能叫什么，
+        # 但知道磁盘上有哪些模块——比对一下就能把这句话说出来。
         available = _list_names(registry.available_names)
         degraded = registry.degraded_modules
         failed = registry.failed_modules
+        lines = [f"未知子命令：{subcommand}"]
+        if subcommand in self._known_module_names and subcommand not in registry.enabled_names:
+            lines.append(
+                f"不过插件里确实有一个叫「{subcommand}」的功能，只是它当前没开启——"
+                f"去 AstrBot 的插件配置页，在「模块开关」里打开它（配置里的名字是 modules.{subcommand}）。"
+            )
         if degraded or failed:
-            lines = [f"未知子命令：{subcommand}", f"可用模块：{available}"]
+            lines.append(f"可用模块：{available}")
             if degraded:
                 lines.append("已装载但当前不可用的模块：")
                 lines.extend(f"  {name}：{reason}" for name, reason in degraded)
@@ -180,8 +197,16 @@ class ArknightsToolbox(Star):
                 lines.append("启动失败的模块（对应功能不可用）：")
                 lines.extend(f"  {name}：{reason}" for name, reason in failed)
         else:
-            lines = [f"未知子命令：{subcommand}", f"已装载的模块：{available}"]
-        lines.append("可用子命令由各模块提供，见各模块文档。")
+            lines.append(f"已装载的模块：{available}")
+        disabled = tuple(
+            name for name in self._known_module_names if name not in registry.enabled_names
+        )
+        if disabled:
+            lines.append(
+                "未开启的模块（想用就去插件配置页的「模块开关」里打开，开关名与这里一致）："
+                + "、".join(disabled)
+            )
+        lines.append("完整指令清单与排障步骤见插件目录下的 README.md。")
         yield event.plain_result("\n".join(lines))
 
     @staticmethod

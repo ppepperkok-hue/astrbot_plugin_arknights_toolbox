@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from pathlib import Path
 
 from modules.maa import relay, tasks
 from modules.maa.queue import (
@@ -250,3 +251,25 @@ def test_the_result_fixtures_are_real() -> None:
     assert results["pending"].outcome is EnqueueOutcome.ALREADY_PENDING
     assert results["done"].outcome is EnqueueOutcome.ALREADY_DONE
     assert AckOutcome.ACKED is not None
+
+
+# --- 面向用户的指南不许把那句假保证写回去 ------------------------------------
+
+
+def test_the_user_guide_does_not_repeat_the_retracted_skip_promise() -> None:
+    """指南里那句无条件保证不许回来（2026-09-29 发布前审查 S4）。
+
+    `relay.skipped_text` 修的正是这句话，但**指南是另一份文件**——代码修好了、
+    文档还留着旧话，用户照着指南读到「班次索引不动」，就会以为班次真的没动。
+
+    ⚠️ 这是**针对具体措辞的回归钉**，不是通用的「文档与代码一致」证明：措辞改了
+    它就该跟着改。它挡的是「整句话被原样写回去」这一类，而那正是发生过的事。
+    """
+    guide = Path(__file__).resolve().parent.parent / "docs" / "guides" / "maa-remote-control.md"
+    text = guide.read_text(encoding="utf-8")
+
+    assert "不派任务，班次索引不动" not in text, (
+        "指南里又出现了无条件保证——skip 在任务已被取走时拦不住，索引照样前进"
+    )
+    # 反过来也要查：条件表述必须在，否则说明有人把整行删掉而不是改对
+    assert "已经被取走的话拦不住" in text

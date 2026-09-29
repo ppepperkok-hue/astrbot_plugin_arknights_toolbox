@@ -35,10 +35,8 @@ from astrbot.api.event import MessageChain
 # 先绝对、失败再回退相对，注册表的自动发现才 import 得动它。
 try:  # pragma: no cover - 走哪支取决于运行场景，两支都是真实路径
     from core.module import Module
-    from core.permission import session_allowed
 except ImportError:  # pragma: no cover
     from ...core.module import Module
-    from ...core.permission import session_allowed
 
 from .dataset import RecruitData, RecruitDataError, load_data
 from .parsing import parse_tags
@@ -146,18 +144,21 @@ class RecruitModule(Module):
     # --- 指令 ---------------------------------------------------------------
 
     async def handle_command(self, command: str, event: Any) -> bool:
-        """处理 `/ak recruit [标签…]`。"""
+        """处理 `/ak recruit [标签…]`。
+
+        **这个模块刻意不做会话门禁**，与其它三个模块不同。理由：
+
+        `core/permission.py` 的群聊限制针对的是「在群里绑定会把提醒推给全体成员」
+        这类**会改状态、或在没人问的时候主动往外发东西**的操作。公开招募是
+        **只读、无状态、不碰绑定**的纯本地计算，而且**只在有人问的时候才回话**——
+        把那条限制套上来属于**限制错了对象**（2026-09-29 审查发现的 S7）。
+
+        而且它恰好是最常见的第一次接触：用户把机器人拉进群，发一条
+        `/ak recruit 输出 近战位`，如果收到「只有管理员能查公开招募」，他会以为
+        这个功能坏了、或者这插件很官僚——而实际上换个私聊就能用。
+        """
         if command not in COMMAND_NAMES:
             return False
-
-        allowed, reason = session_allowed(
-            is_group=not event.is_private_chat(),
-            is_admin=event.is_admin(),
-            action="查公开招募",
-        )
-        if not allowed:
-            await self._reply(event, reason)
-            return True
 
         await self._cmd_recruit(event)
         return True

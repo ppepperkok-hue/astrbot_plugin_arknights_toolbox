@@ -28,6 +28,7 @@ from modules.shift_reminder.schedule import (
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_PATH = REPO_ROOT / "_conf_schema.json"
 METADATA_PATH = REPO_ROOT / "metadata.yaml"
+CHANGELOG_PATH = REPO_ROOT / "CHANGELOG.md"
 
 MODULE_KEY = "shift_reminder"
 SHIFT_INDICES = (1, 2, 3)
@@ -251,4 +252,35 @@ def test_metadata_declares_version_exactly_once() -> None:
     assert len(version_lines) == 1, f"version: 应恰好出现一次，实际为 {version_lines}"
     assert re.fullmatch(r"version: \d+\.\d+\.\d+", version_lines[0]), (
         f"version 必须形如 X.Y.Z，实际为 {version_lines[0]!r}"
+    )
+
+
+def test_metadata_version_has_a_matching_changelog_entry() -> None:
+    """`metadata.yaml` 的版本号必须在 CHANGELOG 里有对应条目。
+
+    为什么加这条（2026-09-29 发布前审查的阻断项 B1）：当时工作区的版本号是
+    `0.4.0`，而 `v0.4.0` 这个 tag 里**连森空岛与 MAA 两个模块都不存在**——
+    **同一个版本号指向两套功能完全不同的产物**，中间隔着 37 个提交。而这类错误
+    **不会让任何检查变红**：版本号本身合法、测试全绿、打包正常。
+
+    唯一能机器化的一半是「**升版本时必须同时写变更记录**」——那就把它变成断言。
+    另一半（「加了功能却忘了升版本」）机器判断不了，只能靠纪律。
+
+    同样**不硬编码版本号**：只要求两边一致，发版时改两处即可。
+    """
+    if not METADATA_PATH.is_file():
+        pytest.fail(f"缺少元数据文件：{METADATA_PATH}")
+    if not CHANGELOG_PATH.is_file():
+        pytest.fail(f"缺少变更记录：{CHANGELOG_PATH}")
+
+    match = re.search(
+        r"^version: (\d+\.\d+\.\d+)$", METADATA_PATH.read_text(encoding="utf-8"), re.MULTILINE
+    )
+    assert match, "metadata.yaml 里没有合法的 version 行"
+    version = match.group(1)
+
+    changelog = CHANGELOG_PATH.read_text(encoding="utf-8")
+    assert re.search(rf"^## \[{re.escape(version)}\]", changelog, re.MULTILINE), (
+        f"CHANGELOG.md 里找不到 [{version}] 这一条——升版本必须同时写变更记录，"
+        "否则用户升级后没有任何东西告诉他多了什么"
     )

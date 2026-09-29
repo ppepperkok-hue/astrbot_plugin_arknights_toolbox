@@ -235,6 +235,60 @@ def test_ak_fallback_reports_failed_modules_separately():
     assert "已装载但当前不可用的模块：" not in reply
 
 
+def test_ak_fallback_explains_a_module_that_exists_but_is_not_enabled():
+    """打了一个**存在、但没开启**的功能名时，必须说清「去配置里把它打开」。
+
+    这是最要紧的一种情况：用户照着 MAA 指南发 `/ak maa`，却忘了先开开关，
+    而「未知子命令」让他完全想不到要去配置页里找什么（2026-09-29 审查 S6）。
+    宿主不知道功能叫什么，但知道磁盘上有哪些模块，比对一下就能把这句话说出来。
+    """
+    register_module("healthy", lambda: FakeModule("healthy"))
+    plugin = _toolbox({"healthy": True})
+    asyncio.run(plugin.initialize())
+
+    # `maa` 是磁盘上真实存在的模块，而这次它没被打开
+    reply = _ak_reply(plugin, "/ak maa")
+
+    assert "没开启" in reply
+    assert "modules.maa" in reply
+    assert "插件配置页" in reply
+
+
+def test_ak_fallback_does_not_claim_an_unknown_word_exists():
+    """反过来也要对：不存在的子命令**不许**被说成「有，只是没开」。"""
+    register_module("healthy", lambda: FakeModule("healthy"))
+    plugin = _toolbox({"healthy": True})
+    asyncio.run(plugin.initialize())
+
+    reply = _ak_reply(plugin, "/ak 根本没这个东西")
+
+    assert "没开启" not in reply
+
+
+def test_ak_fallback_points_at_the_readme_instead_of_a_dead_end():
+    """原先那句「见各模块文档」是死指针——README 里并没有那个入口。"""
+    register_module("healthy", lambda: FakeModule("healthy"))
+    plugin = _toolbox({"healthy": True})
+    asyncio.run(plugin.initialize())
+
+    reply = _ak_reply(plugin, "/ak 不存在的子命令")
+
+    assert "README.md" in reply
+    assert "见各模块文档" not in reply
+
+
+def test_ak_fallback_lists_the_modules_that_are_off():
+    """没开的模块要单独列出来——那是用户「我还能开什么」的唯一提示。"""
+    register_module("healthy", lambda: FakeModule("healthy"))
+    plugin = _toolbox({"healthy": True})
+    asyncio.run(plugin.initialize())
+
+    reply = _ak_reply(plugin, "/ak 不存在的子命令")
+    lines = [line.strip() for line in reply.splitlines()]
+
+    assert any(line.startswith("未开启的模块") and "maa" in line for line in lines)
+
+
 # --- 真实接缝：真模块 + 真宿主（待办 8 的原始复现场景） -----------------------
 
 
