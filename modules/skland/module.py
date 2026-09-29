@@ -31,7 +31,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -375,13 +375,13 @@ class SklandModule(Module):
             return
 
         try:
-            payload = await asyncio.to_thread(self._scan_login_request)
-            ticket = login.parse_scan_ticket(payload)
+            ticket = await self._run_step(
+                login.STEP_SCAN_TICKET,
+                self._scan_login_request,
+                login.parse_scan_ticket,
+            )
         except login.ScanLoginError as exc:
-            await self._reply(event, f"取二维码失败：{exc}")
-            return
-        except api.SklandError as exc:
-            await self._reply(event, f"取二维码失败：{exc}")
+            await self._report_failure(event.unified_msg_origin, exc)
             return
 
         try:
@@ -406,49 +406,116 @@ class SklandModule(Module):
             self._poll_scan(event, ticket.scan_id, event.unified_msg_origin)
         )
 
-    def _scan_login_request(self) -> Any:
+    def _scan_login_request(self) -> api.RawCall:
         """第一步：向通行证侧要一张二维码票据（**不需要凭据**）。
 
         `UNVERIFIED`：本步骤的**请求已实测**（200 且返回 scanId/scanUrl），
         这里只是把它接进客户端。
         """
         assert self._client is not None
-        return self._client.call_unauthenticated(
+        return self._client.call_unauthenticated_detailed(
             "POST",
             f"{api.HYPERGRYPH_BASE}/general/v1/gen_scan/login",
             {"appCode": api.APP_CODE_SKLAND},
         )
+
+    async def _run_step(
+        self,
+        step: login.Step,
+        request: Callable[[], api.RawCall],
+        parser: Callable[[Any], Any],
+    ) -> Any:
+        """跑一步，**任何失败都返回带步骤与响应摘要的 `ScanLoginError`**。
+
+        这是「下次失败要能定位」的落点：网络层失败、服务端拒绝、解析不出字段——
+        三条路都会在消息里带上第几步、HTTP 状态、以及服务端响了什么字段。
+        """
+        try:
+            raw = await asyncio.to_thread(request)
+        except api.SklandError as exc:
+            raise login.step_failure(
+                step,
+                str(exc),
+                getattr(exc, "payload", None),
+                http_status=getattr(exc, "http_status", None),
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 - 传输层之外的意外同样要带步骤
+            raise login.step_failure(step, f"{type(exc).__name__}: {exc}") from exc
+        try:
+            return parser(raw.payload)
+        except login.ScanLoginError as exc:
+            # 用 `reason` 而不是 `str(exc)`：解析器自己已经带过步骤前缀了，
+            # 直接拼接会套娃（「第 3 步 失败：第 3 步 失败：…」）。
+            raise login.step_failure(
+                step, exc.reason or str(exc), raw.payload, http_status=raw.http_status
+            ) from exc
 
     async def _poll_scan(self, event: Any, scan_id: str, umo: str) -> None:
         """轮询扫码状态，拿到 scanCode 就走完后三步。
 
         任务**有上限**，因为它是用户指令触发的短流程；契约禁止的是「自己起调度循环」，
         不是「一次有界的异步等待」。`terminate` 会取消它。
+
+        **每次状态变化记一行**（不只是失败）：2026-09-29 那次线上失败里，日志只有
+        「已发送二维码」一行，**中间发生过什么完全没有痕迹**，于是无从判断用户到底
+        扫没扫、确认没确认。这条日志是补上那段空白的地方。
+
+        记的是**状态取值与键名**，不是响应原文——`scan_status` 一旦成功就带
+        `scanCode`（凭据），整段响应进日志就泄露了。
         """
+        seen: set[str] = set()
         try:
             for _ in range(POLL_ATTEMPTS):
                 await asyncio.sleep(POLL_INTERVAL_SECONDS)
                 try:
-                    payload = await asyncio.to_thread(self._scan_status_request, scan_id)
-                    reading = login.interpret_scan_status(payload)
+                    raw = await asyncio.to_thread(self._scan_status_request, scan_id)
+                    reading = login.interpret_scan_status(raw.payload)
                 except (api.SklandError, login.ScanLoginError) as exc:
-                    await self._send(umo, f"查询扫码状态失败：{exc}")
+                    await self._report_failure(
+                        umo,
+                        login.step_failure(
+                            login.STEP_POLL,
+                            str(exc),
+                            getattr(exc, "payload", None),
+                            http_status=getattr(exc, "http_status", None),
+                        ),
+                    )
                     return
+
+                # 每种新形态记一次，够定位又不刷屏。
+                shape = f"{reading.state.value}|{login.describe_response(raw.payload, http_status=raw.http_status)}"
+                if shape not in seen:
+                    seen.add(shape)
+                    logger.info("[ak_toolbox][skland] 扫码状态变化：%s", shape)
 
                 if reading.state is login.ScanState.SCANNED:
                     await self._complete_login(umo, reading.scan_code)
                     return
+                if reading.state is login.ScanState.EXPIRED:
+                    await self._send(
+                        umo,
+                        f"二维码已失效（{reading.message}）。重新发一次 /ak skland login 即可。",
+                    )
+                    return
                 if reading.state is login.ScanState.FAILED:
-                    await self._send(umo, f"扫码失败：{reading.message}")
+                    await self._report_failure(
+                        umo,
+                        login.step_failure(
+                            login.STEP_POLL,
+                            reading.message,
+                            raw.payload,
+                            http_status=raw.http_status,
+                        ),
+                    )
                     return
             await self._send(umo, "二维码超时了（约 2 分钟）。再发一次 /ak skland login。")
         except asyncio.CancelledError:  # pragma: no cover - 重载时取消
             logger.info("[ak_toolbox][skland] 扫码轮询被取消")
             raise
 
-    def _scan_status_request(self, scan_id: str) -> Any:
+    def _scan_status_request(self, scan_id: str) -> api.RawCall:
         assert self._client is not None
-        return self._client.call_unauthenticated(
+        return self._client.call_unauthenticated_detailed(
             "GET",
             f"{api.HYPERGRYPH_BASE}/general/v1/scan_status?scanId={scan_id}",
         )
@@ -457,33 +524,42 @@ class SklandModule(Module):
         """扫到了：走完换 token → grant → cred 三步，成功后落盘。"""
         if self._client is None or self._store is None:
             return
+        client = self._client
         try:
-            token_payload = await asyncio.to_thread(
-                self._client.call_unauthenticated,
-                "POST",
-                f"{api.HYPERGRYPH_BASE}/user/auth/v1/token_by_scan_code",
-                login.token_request(scan_code),
+            # 请求体在**步骤之外**先构造好：`token_request` 自己会对非法 base64 抛
+            # 带第 3 步前缀的错误，放进 lambda 里会被下面那个兜底分支包成一句
+            # 莫名其妙的话。
+            token_body = login.token_request(scan_code)
+            passport_token = await self._run_step(
+                login.STEP_TOKEN,
+                lambda: client.call_unauthenticated_detailed(
+                    "POST",
+                    f"{api.HYPERGRYPH_BASE}/user/auth/v1/token_by_scan_code",
+                    token_body,
+                ),
+                login.parse_token_by_scan_code,
             )
-            passport_token = login.parse_token_by_scan_code(token_payload)
-
-            grant_payload = await asyncio.to_thread(
-                self._client.call_unauthenticated,
-                "POST",
-                f"{api.HYPERGRYPH_BASE}/user/oauth2/v2/grant",
-                login.grant_request(api.APP_CODE_SKLAND, passport_token),
+            grant_code = await self._run_step(
+                login.STEP_GRANT,
+                lambda: client.call_unauthenticated_detailed(
+                    "POST",
+                    f"{api.HYPERGRYPH_BASE}/user/oauth2/v2/grant",
+                    login.grant_request(api.APP_CODE_SKLAND, passport_token),
+                ),
+                login.parse_grant_code,
             )
-            grant_code = login.parse_grant_code(grant_payload)
-
-            cred_payload = await asyncio.to_thread(
-                self._client.call_unauthenticated,
-                "POST",
-                f"{api.ZONAI_BASE}/user/auth/generate_cred_by_code",
-                login.cred_request(grant_code),
+            cred, token = await self._run_step(
+                login.STEP_CRED,
+                lambda: client.call_unauthenticated_detailed(
+                    "POST",
+                    f"{api.ZONAI_BASE}/user/auth/generate_cred_by_code",
+                    login.cred_request(grant_code),
+                ),
+                login.parse_credential,
             )
-            cred, token = login.parse_credential(cred_payload)
-        except (api.SklandError, login.ScanLoginError) as exc:
-            # 失败要说清是哪一步，**且绝不回显任何 token/cred**。
-            await self._send(umo, f"授权流程失败（没有拿到凭据）：{exc}")
+        except login.ScanLoginError as exc:
+            # 失败要说清是哪一步、服务端回了什么，**且绝不回显任何 token/cred**。
+            await self._report_failure(umo, exc)
             return
         except Exception as exc:  # noqa: BLE001 - 兜底，避免后台任务静默死掉
             logger.exception("[ak_toolbox][skland] 授权流程异常")
@@ -579,6 +655,17 @@ class SklandModule(Module):
             len(png),
             len(getattr(chain, "chain", ())),
         )
+
+    async def _report_failure(self, umo: str, exc: login.ScanLoginError) -> None:
+        """一次失败**同时**落到日志与回执，且两边是同一段文案。
+
+        为什么同一段：用户把回执原样发回来，就等于给了我们日志里那一行——不需要他
+        描述现象、也不需要他复述服务端响应。文案由 `login.describe_response` 渲染，
+        **结构上不含凭据**（`data` 里的凭据键只输出长度与摘要）。
+        """
+        logger.error("[ak_toolbox][skland] %s", exc)
+        action = exc.action or "稍后再试一次。"
+        await self._send(umo, f"授权没走完。{exc}\n{action}")
 
     async def _send(self, umo: str, text: str) -> None:
         """给指定会话发文本。

@@ -44,6 +44,7 @@ __all__ = [
     "ZONAI_BASE",
     "CachePolicy",
     "HttpResponse",
+    "RawCall",
     "SklandClient",
     "SklandError",
     "SklandLoginExpired",
@@ -75,11 +76,27 @@ CODE_NOT_LOGGED_IN: Final[int] = 10002
 
 
 class SklandError(Exception):
-    """森空岛接口返回了非成功结果。"""
+    """森空岛接口返回了非成功结果。
 
-    def __init__(self, message: str, *, code: int | None = None) -> None:
+    Attributes:
+        http_status: 该次请求的 HTTP 状态码（能拿到就有）。**判据在 body 里而不是这里**，
+            但排查时它与 `code` 要一起看——实测同一个 `10001` 出现过 400 与 500。
+        payload: 服务端返回的已解析响应体。**仅供程序读取诊断字段**，绝不可整段进日志
+            （里面可能带凭据）；渲染摘要请走 `login.describe_response`。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: int | None = None,
+        http_status: int | None = None,
+        payload: Any = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.http_status = http_status
+        self.payload = payload
 
 
 class SklandUnauthorized(SklandError):
@@ -232,6 +249,21 @@ def _message_of(payload: Any, fallback: str) -> str:
     return fallback
 
 
+@dataclass(frozen=True)
+class RawCall:
+    """一次未签名调用的原始结果——给扫码链路做排查用。
+
+    只带**服务端回了什么**，不带**我们发了什么**：第 3 步的请求体里就是 `scanCode`，
+    绝不能让任何"方便排查"的设计把它带出去。`path` 也刻意**不含 query**——轮询的
+    query 里就是 `scanId`，同样算登录票据。
+    """
+
+    payload: Any
+    http_status: int
+    method: str
+    path: str
+
+
 class SklandClient:
     """带签名的森空岛客户端。
 
@@ -265,6 +297,17 @@ class SklandClient:
     # --- 传输 ---------------------------------------------------------------
 
     def _call(self, method: str, url: str, *, body: Any = None, signed: bool = True) -> Any:
+        payload, _ = self._call_raw(method, url, body=body, signed=signed)
+        return payload
+
+    def _call_raw(
+        self, method: str, url: str, *, body: Any = None, signed: bool = True
+    ) -> tuple[Any, int]:
+        """发一次请求，返回 `(已解析响应体, HTTP 状态码)`。
+
+        为什么要单独把状态码带出来：扫码链路的失败只报「响应里没有 data」，
+        **没有 HTTP 状态就无法区分「服务端拒绝」与「网关改写了响应」**。
+        """
         self.cache.check_cooldown(urllib.parse.urlsplit(url).path)
 
         payload_bytes = (
@@ -294,24 +337,46 @@ class SklandClient:
             payload = json.loads(response.body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise SklandTransportError(
-                f"响应不是合法 JSON（HTTP {response.status}）：{exc}"
+                f"响应不是合法 JSON（HTTP {response.status}）：{exc}",
+                http_status=response.status,
             ) from exc
 
         code = _extract_code(payload)
         if code is None:
             # 通行证侧（hypergryph）用 status 字段而不是 code，所以只有在带了 code
             # 的接口上才要求它存在。这里不猜——交给调用方按各自协议判。
-            return payload
+            return payload, response.status
         if code == CODE_SUCCESS:
-            return payload
+            return payload, response.status
         message = _message_of(payload, f"接口返回 code={code}")
+        detail = f"（HTTP {response.status}，code={code}）"
         if code == CODE_BAD_CRED:
-            raise SklandUnauthorized(f"凭据无效，需要重新授权：{message}", code=code)
+            raise SklandUnauthorized(
+                f"凭据无效，需要重新授权{detail}：{message}",
+                code=code,
+                http_status=response.status,
+                payload=payload,
+            )
         if code == CODE_NOT_LOGGED_IN:
-            raise SklandLoginExpired(f"登录已失效，需要重新授权：{message}", code=code)
+            raise SklandLoginExpired(
+                f"登录已失效，需要重新授权{detail}：{message}",
+                code=code,
+                http_status=response.status,
+                payload=payload,
+            )
         if code == CODE_BAD_PARAM:
-            raise SklandParamError(f"接口参数错误（不会重试）：{message}", code=code)
-        raise SklandError(f"接口返回 code={code}：{message}", code=code)
+            raise SklandParamError(
+                f"接口参数错误（不会重试）{detail}：{message}",
+                code=code,
+                http_status=response.status,
+                payload=payload,
+            )
+        raise SklandError(
+            f"接口返回 code={code}{detail}：{message}",
+            code=code,
+            http_status=response.status,
+            payload=payload,
+        )
 
     # --- 有实测依据的接口 ---------------------------------------------------
 
@@ -323,6 +388,20 @@ class SklandClient:
         由那一层按各自的响应形态处理。顺手过了同一个冷却，免得把通行证侧打爆。
         """
         return self._call(method, url, body=body, signed=False)
+
+    def call_unauthenticated_detailed(self, method: str, url: str, body: Any = None) -> RawCall:
+        """与 :meth:`call_unauthenticated` 同一条路，但**把 HTTP 状态码也带回来**。
+
+        扫码链路改用它：只报「响应里没有 data」而不报状态码，等于把最便宜的一条线索
+        丢掉。返回值里**不含请求体**——见 :class:`RawCall`。
+        """
+        payload, status = self._call_raw(method, url, body=body, signed=False)
+        return RawCall(
+            payload=payload,
+            http_status=status,
+            method=method,
+            path=urllib.parse.urlsplit(url).path,
+        )
 
     def health_check(self) -> dict[str, Any]:
         """健康检查：打**真实取数接口**，以 `code == 0` 为准。
