@@ -459,6 +459,75 @@ def test_roster_view_survives_dirty_entries() -> None:
 # 体积上限、内容校验、错误码。真实上传留服务器验收。
 
 
+def test_roster_view_exposes_groups_and_totals() -> None:
+    """页面主要靠 `groups` 成块展示；顶部汇总要有数字可核对。"""
+    view = webapi.roster_view(_roster_sample())
+
+    assert view["total_rooms"] == 3
+    assert view["total_operators"] == 3
+    first = view["shifts"][0]
+    assert [group["room"] for group in first["groups"]] == ["trading", "dormitory"]
+
+
+def test_group_rooms_orders_known_types_before_unknown() -> None:
+    """已知房型按 ROOM_ORDER 排，未知房型排最后——但没有被丢掉。"""
+    rooms = [
+        {"room": "dormitory", "index": 1, "operators": ["a"], "skipped": False},
+        {"room": "trading", "index": 2, "operators": ["b"], "skipped": False},
+        {"room": "power", "index": 1, "operators": ["c"], "skipped": False},
+        {"room": "weird_room", "index": 1, "operators": ["d"], "skipped": False},
+    ]
+    groups = webapi.group_rooms(rooms)
+
+    assert [group["room"] for group in groups] == [
+        "trading",
+        "power",
+        "dormitory",
+        "weird_room",
+    ]
+    # 未知房型用 key 兜底当 label，不显示空字符串。
+    assert groups[-1]["label"] == "weird_room"
+
+
+def test_group_rooms_sorts_within_a_type_and_counts() -> None:
+    """同类型内按 index 升序，并自报数量——这才是「几间贸易站」的答案。"""
+    rooms = [
+        {"room": "trading", "index": 2, "operators": ["x"], "skipped": False},
+        {"room": "trading", "index": 1, "operators": ["a", "b"], "skipped": False},
+        {"room": "trading", "index": 3, "operators": [], "skipped": True},
+    ]
+    (group,) = webapi.group_rooms(rooms)
+
+    assert group["label"] == "贸易站"
+    assert group["count"] == 3
+    assert group["operator_count"] == 3
+    assert group["skipped_count"] == 1
+    assert [room["index"] for room in group["rooms"]] == [1, 2, 3]
+
+
+def test_group_rooms_handles_empty_input() -> None:
+    """没有房间时返回空列表，不做任何编造。"""
+    assert webapi.group_rooms([]) == []
+    assert webapi.group_rooms([{"no_room_key": True}])[0]["room"] == ""
+
+
+def test_group_rooms_ignores_items_with_a_bad_index() -> None:
+    """`index` 不是整数时排到**最后**，房间本身仍然保留。
+
+    为什么是最后而不是最前：排最前会让未知项冒充「第一间」，用户会以为那就是
+    1 号房——宁可它出现在末尾，也不要显示一个错误的位置。
+    """
+    rooms = [
+        {"room": "power", "index": "3", "operators": ["a"], "skipped": False},
+        {"room": "power", "index": 1, "operators": ["b"], "skipped": False},
+    ]
+    (group,) = webapi.group_rooms(rooms)
+
+    assert group["count"] == 2
+    assert group["rooms"][0]["index"] == 1
+    assert group["rooms"][-1]["index"] == "3"
+
+
 def _schedule_json() -> bytes:
     """一份结构合法的最小排班表（3 班，与解析器的要求一致）。"""
     payload = {

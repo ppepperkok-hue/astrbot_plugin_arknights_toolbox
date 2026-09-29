@@ -181,66 +181,218 @@ button.small {
 }
 
 .roster {
-  margin-top: 10px;
+  margin-top: 4px;
 }
 
-.roster-shift {
-  margin-top: 14px;
-  padding-top: 10px;
-  border-top: 1px solid var(--line);
-}
-
-.roster-shift h3 {
-  margin: 0 0 4px;
-  font-size: 14px;
-}
-
-.roster-rooms {
-  list-style: none;
-  margin: 6px 0 0;
-  padding: 0;
-  display: grid;
-  gap: 4px;
-  font-size: 13px;
-}
-
-.roster-rooms li {
+/* 顶部汇总：让用户一眼看出「这套布局有多大」。 */
+.roster-summary {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
   align-items: baseline;
-  padding: 4px 8px;
-  border-radius: 6px;
-  background: var(--bg);
+  gap: 10px 18px;
+  margin-top: 12px;
 }
 
-/* 「不动」的房间照实显示，但一眼能看出它们不会被写进提醒。 */
-.roster-rooms li.skipped {
-  opacity: 0.72;
-  text-decoration: line-through;
-  text-decoration-color: var(--muted);
+.roster-summary:empty {
+  display: none;
 }
 
-.roster-rooms .where {
-  flex: 0 0 auto;
-  min-width: 5em;
+.stat {
+  display: flex;
+  align-items: baseline;
+  gap: 3px;
+}
+
+.stat-value {
+  font-size: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.stat-unit {
+  font-size: 12px;
   color: var(--muted);
 }
 
-.roster-rooms .who {
-  flex: 1 1 auto;
-  min-width: 0;
-  word-break: break-word;
+.roster-meta {
+  flex: 1 1 100%;
 }
 
-.roster-rooms .tag {
+/* 每个班次一块，左侧色条与时间轴的段色对应。 */
+.roster-shift {
+  margin-top: 16px;
+  padding: 12px 12px 4px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line);
+  border-radius: 10px;
+}
+
+.roster-shift.shift-tint-0 {
+  border-left-color: var(--shift-1);
+}
+
+.roster-shift.shift-tint-1 {
+  border-left-color: var(--shift-2);
+}
+
+.roster-shift.shift-tint-2 {
+  border-left-color: var(--shift-3);
+}
+
+.shift-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.shift-head h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.shift-badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.shift-badge-0 {
+  background: var(--shift-1);
+}
+
+.shift-badge-1 {
+  background: var(--shift-2);
+}
+
+.shift-badge-2 {
+  background: var(--shift-3);
+}
+
+.shift-count {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 房型网格：窄屏自动折成一列，宽屏并排。 */
+.room-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+}
+
+.room-card {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--bg);
+  padding: 8px 10px 10px;
+  min-width: 0;
+}
+
+.room-card-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: 1px dashed var(--line);
+}
+
+.room-icon {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+  font-weight: 600;
+}
+
+.room-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.room-qty {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.room-list {
+  display: grid;
+  gap: 6px;
+}
+
+.room-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.room-row .room-where {
+  flex: 0 0 auto;
+  min-width: 1.1em;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  padding-top: 1px;
+}
+
+.ops {
+  flex: 1 1 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.op {
+  padding: 1px 7px;
+  border-radius: 6px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+/* 「不动」的房间照实显示（给了全貌才不会被误认为读漏），但视觉上退到后面。
+   刻意**不用删除线**——那看起来像数据坏了，而它其实是一条正常的排班信息。 */
+.room-row.skipped {
+  opacity: 0.55;
+}
+
+.room-row.skipped .op {
+  background: transparent;
+  border-style: dashed;
+}
+
+.room-row .tag {
   flex: 0 0 auto;
   padding: 1px 6px;
   border-radius: 999px;
-  background: var(--line);
+  border: 1px solid var(--line);
+  background: var(--card);
   color: var(--muted);
   font-size: 11px;
-  text-decoration: none;
+  line-height: 1.6;
+}
+
+@media (max-width: 560px) {
+  .room-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 code {

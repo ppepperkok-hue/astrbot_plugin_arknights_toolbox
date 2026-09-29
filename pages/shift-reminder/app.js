@@ -651,12 +651,36 @@ function render(payload) {
   setText("status-line", `读取时间 ${String(data.now || "").replace("T", " ").slice(0, 19)}`);
 }
 
+/**
+ * 房型图标：取中文名的**首字**做成徽章。
+ *
+ * 为什么这么做：不引任何外部资源是硬要求（离线环境 + 图片版权），而图标字体
+ * 同样是外部依赖。中文房型名的首字天然就是最好的缩写——「贸」「制」「电」「宿」，
+ * 一眼能认，且与名称永远一致（不会像图标表那样跟数据漂移）。
+ */
+function roomInitial(label) {
+  const text = String(label || "").trim();
+  return text ? text.slice(0, 1) : "房";
+}
+
+/** 一个干员名 → 紧凑标签块。 */
+function operatorChip(name) {
+  const chip = document.createElement("span");
+  chip.className = "op";
+  chip.textContent = name;
+  return chip;
+}
+
 function renderRoster(view) {
   const host = byId("roster-detail");
+  const summaryHost = byId("roster-summary");
   if (!host) {
     return;
   }
   host.textContent = "";
+  if (summaryHost) {
+    summaryHost.textContent = "";
+  }
 
   if (!view || view.imported !== true) {
     const p = document.createElement("p");
@@ -668,64 +692,137 @@ function renderRoster(view) {
     return;
   }
 
-  const head = document.createElement("p");
-  head.className = "muted";
-  const parts = [`共 ${view.shift_count} 个班次`];
-  if (view.source) {
-    parts.push(`来源 ${view.source}`);
-  }
-  if (view.imported_at) {
-    parts.push(`导入于 ${String(view.imported_at).replace("T", " ").slice(0, 16)}`);
-  }
-  if (view.skipped_total) {
-    parts.push(`${view.skipped_total} 间标了「不动」`);
-  }
-  head.textContent = parts.join(" · ");
-  host.append(head);
-
-  (view.shifts || []).forEach((shift) => {
-    const block = document.createElement("div");
-    block.className = "roster-shift";
-
-    const title = document.createElement("h3");
-    title.textContent = `第 ${shift.plan_index} 班　${shift.plan_name}`;
-    block.append(title);
+  // --- 顶部汇总：一眼看出「这套布局有多大」 ---------------------------------
+  if (summaryHost) {
+    const stats = [
+      { value: view.shift_count, unit: "个班次" },
+      { value: view.total_rooms, unit: "间房" },
+      { value: view.total_operators, unit: "位干员" },
+    ];
+    if (view.skipped_total) {
+      stats.push({ value: view.skipped_total, unit: "间「不动」" });
+    }
+    for (const stat of stats) {
+      const box = document.createElement("div");
+      box.className = "stat";
+      const value = document.createElement("span");
+      value.className = "stat-value";
+      value.textContent = String(stat.value ?? 0);
+      const unit = document.createElement("span");
+      unit.className = "stat-unit";
+      unit.textContent = stat.unit;
+      box.append(value, unit);
+      summaryHost.append(box);
+    }
 
     const meta = document.createElement("p");
-    meta.className = "muted";
-    meta.textContent = `${shift.room_count} 个房间、${shift.operator_count} 位干员`;
-    block.append(meta);
+    meta.className = "muted roster-meta";
+    const parts = [];
+    if (view.source) {
+      parts.push(`来源 ${view.source}`);
+    }
+    if (view.imported_at) {
+      parts.push(`导入于 ${String(view.imported_at).replace("T", " ").slice(0, 16)}`);
+    }
+    meta.textContent = parts.join(" · ");
+    summaryHost.append(meta);
+  }
 
-    const list = document.createElement("ul");
-    list.className = "roster-rooms";
-    (shift.rooms || []).forEach((room) => {
-      const li = document.createElement("li");
-      if (room.skipped) {
-        li.classList.add("skipped");
-      }
+  // --- 逐班：按房型成块 -----------------------------------------------------
+  (view.shifts || []).forEach((shift, shiftIndex) => {
+    const block = document.createElement("section");
+    block.className = `roster-shift shift-tint-${shiftIndex % 3}`;
 
-      const where = document.createElement("span");
-      where.className = "where";
-      where.textContent = room.where || room.label || room.room || "?";
-      li.append(where);
+    const head = document.createElement("div");
+    head.className = "shift-head";
 
-      const who = document.createElement("span");
-      who.className = "who";
-      who.textContent = (room.operators || []).join("、") || "（无）";
-      li.append(who);
+    const badge = document.createElement("span");
+    badge.className = `shift-badge shift-badge-${shiftIndex % 3}`;
+    badge.textContent = `第 ${shift.plan_index} 班`;
+    head.append(badge);
 
-      if (room.skipped) {
-        const tag = document.createElement("span");
-        tag.className = "tag";
-        // 页面上必须显示这些房间并标注——藏起来用户会以为我们读漏了。
-        // 提醒消息里相反：那里不渲染它们，因为那是给用户的「指令」，
-        // 让用户去换一间排班表标明不要动的房就是错误信息。
-        tag.textContent = "不动";
-        li.append(tag);
-      }
-      list.append(li);
+    const title = document.createElement("h3");
+    title.textContent = shift.plan_name || `第 ${shift.plan_index} 班`;
+    head.append(title);
+
+    const count = document.createElement("span");
+    count.className = "muted shift-count";
+    count.textContent = `${shift.room_count} 间房 · ${shift.operator_count} 位干员`;
+    head.append(count);
+    block.append(head);
+
+    const grid = document.createElement("div");
+    grid.className = "room-grid";
+
+    (shift.groups || []).forEach((group) => {
+      const card = document.createElement("div");
+      card.className = "room-card";
+
+      const cardHead = document.createElement("div");
+      cardHead.className = "room-card-head";
+
+      const icon = document.createElement("span");
+      icon.className = "room-icon";
+      icon.setAttribute("aria-hidden", "true");
+      icon.textContent = roomInitial(group.label);
+      cardHead.append(icon);
+
+      const label = document.createElement("span");
+      label.className = "room-label";
+      label.textContent = group.label;
+      cardHead.append(label);
+
+      // 「×2」这种数量徽标，直接回答「这套布局有几间贸易站」。
+      const qty = document.createElement("span");
+      qty.className = "room-qty";
+      qty.textContent = `×${group.count}`;
+      cardHead.append(qty);
+      card.append(cardHead);
+
+      const list = document.createElement("div");
+      list.className = "room-list";
+      (group.rooms || []).forEach((room) => {
+        const row = document.createElement("div");
+        row.className = "room-row";
+        if (room.skipped) {
+          row.classList.add("skipped");
+        }
+
+        const where = document.createElement("span");
+        where.className = "room-where";
+        where.textContent = room.index === null || room.index === undefined ? "—" : String(room.index);
+        row.append(where);
+
+        const ops = document.createElement("div");
+        ops.className = "ops";
+        const names = room.operators || [];
+        if (names.length === 0) {
+          const none = document.createElement("span");
+          none.className = "muted";
+          none.textContent = "（空）";
+          ops.append(none);
+        } else {
+          names.forEach((name) => ops.append(operatorChip(name)));
+        }
+        row.append(ops);
+
+        if (room.skipped) {
+          const tag = document.createElement("span");
+          tag.className = "tag";
+          // 页面上必须显示这些房间并标注——藏起来用户会以为我们读漏了。
+          // 提醒消息里相反：那里不渲染它们，因为那是给用户的「指令」，
+          // 让用户去换一间排班表标明不要动的房就是错误信息。
+          tag.textContent = "不动";
+          tag.title = "排班表标明这一班这间房不要动，提醒里不会出现它";
+          row.append(tag);
+        }
+        list.append(row);
+      });
+      card.append(list);
+      grid.append(card);
     });
-    block.append(list);
+
+    block.append(grid);
     host.append(block);
   });
 }

@@ -183,6 +183,74 @@ def _room_view(room: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
+#: 房型在页面上的展示顺序。按基建里的实际动线排：产资源的在前、后勤在后。
+#: 这不是"重要程度"，只是让每次打开页面的排列都一样——顺序随数据浮动会让人
+#: 每次都要重新找位置。未列出的房型排在最后（按名称），不会因此被丢掉。
+ROOM_ORDER = (
+    "trading",
+    "manufacture",
+    "power",
+    "dormitory",
+    "control",
+    "meeting",
+    "hire",
+    "processing",
+)
+
+
+def group_rooms(rooms: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """把一班的房间**按房型分组**，供页面成块展示（纯逻辑）。
+
+    为什么需要分组：平铺一列 13~15 行时，用户看不出「这套布局有几间贸易站、几间
+    制造站」——而那恰恰是基建布局最要紧的信息。分组后每块自报数量。
+
+    Args:
+        rooms: :func:`roster_view` 产出的房间展示结构序列（每项含 ``room`` /
+            ``label`` / ``index`` / ``where`` / ``operators`` / ``skipped``）。
+
+    Returns:
+        分组列表，每项为 ``{"room", "label", "count", "operator_count",
+        "skipped_count", "rooms": [...]}``；组内房间按 ``index`` 升序，
+        组间按 :data:`ROOM_ORDER`，未列出的房型按中文名排在最后。
+    """
+    buckets: dict[str, list[Mapping[str, Any]]] = {}
+    for room in rooms:
+        if not isinstance(room, Mapping):
+            continue
+        key = str(room.get("room", ""))
+        buckets.setdefault(key, []).append(room)
+
+    def sort_key(key: str) -> tuple[int, str]:
+        if key in ROOM_ORDER:
+            return (ROOM_ORDER.index(key), "")
+        # 未知房型排在已知之后；用中文名作次级键，保证顺序稳定。
+        return (len(ROOM_ORDER), key)
+
+    def room_key(room: Mapping[str, Any]) -> tuple[int, int]:
+        index = room.get("index")
+        # 序号缺失或不是整数时排到**最后**：让它去冒充「第一间」比排在末尾更糟
+        # （用户会以为那就是 1 号房）。
+        if isinstance(index, int):
+            return (0, index)
+        return (1, 0)
+
+    groups: list[dict[str, Any]] = []
+    for key in sorted(buckets, key=sort_key):
+        items = buckets[key]
+        ordered = sorted(items, key=room_key)
+        groups.append(
+            {
+                "room": key,
+                "label": ROOM_LABELS.get(key, key) or key,
+                "count": len(ordered),
+                "operator_count": sum(len(room.get("operators") or []) for room in ordered),
+                "skipped_count": sum(1 for room in ordered if room.get("skipped")),
+                "rooms": list(ordered),
+            }
+        )
+    return groups
+
+
 def roster_view(roster: Mapping[str, Any] | None) -> dict[str, Any]:
     """把落盘的排班表转成页面展示结构（纯逻辑，不读文件、不调时间）。
 
@@ -231,11 +299,16 @@ def roster_view(roster: Mapping[str, Any] | None) -> dict[str, Any]:
                 "plan_index": plan_index,
                 "plan_name": str(item.get("plan_name", "")) or f"第 {plan_index} 班",
                 "rooms": rooms,
+                # 分组是页面的主要呈现方式；`rooms` 平铺保留，方便调用方按需取用。
+                "groups": group_rooms(rooms),
                 "room_count": len(rooms),
                 "operator_count": sum(len(room["operators"]) for room in rooms),
                 "skipped_count": sum(1 for room in rooms if room["skipped"]),
             }
         )
+
+    total_rooms = sum(shift["room_count"] for shift in shifts)
+    total_operators = sum(shift["operator_count"] for shift in shifts)
 
     return {
         "imported": True,
@@ -243,5 +316,8 @@ def roster_view(roster: Mapping[str, Any] | None) -> dict[str, Any]:
         "imported_at": str(roster.get("imported_at", "")),
         "shift_count": len(shifts),
         "skipped_total": skipped_total,
+        # 顶部汇总用：让用户一眼看出「这套布局有多大」。
+        "total_rooms": total_rooms,
+        "total_operators": total_operators,
         "shifts": shifts,
     }
