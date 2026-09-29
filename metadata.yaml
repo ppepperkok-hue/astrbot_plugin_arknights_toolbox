@@ -40,6 +40,12 @@ version: 0.5.0
 author: ppepperkok-hue
 repo: https://github.com/ppepperkok-hue/astrbot_plugin_arknights_toolbox
 astrbot_version: ">=4.17.0"
+# Only the adapter this plugin has actually been exercised against. The
+# reminder path needs a text message channel and the skland path needs to send
+# an image (the QR code), which we have verified on aiocqhttp only. Declaring
+# platforms we have not tested would be a promise we cannot keep.
+support_platforms:
+  - aiocqhttp
 tags:
   - 明日方舟
   - arknights
