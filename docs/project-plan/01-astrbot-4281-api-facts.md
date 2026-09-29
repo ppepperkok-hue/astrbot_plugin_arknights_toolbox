@@ -56,7 +56,20 @@
 1. **后台定时**：在 `initialize()` 里起 `asyncio.create_task`（官方推荐），或自建 `AsyncIOScheduler`（`daily_sharing` 已跑通）；`terminate()` 里必须 shutdown + cancel，防止重载后重复触发。
 2. **主动推送**：`StarTools.send_message(umo, chain)` 或 `self.context.send_message(umo, chain)`；umo 通过与用户的一次交互取得并存到 `plugin_data`。
 3. **V2 的 WebUI 页**：`pages/<name>/index.html` + `context.register_web_api()`，4.28.1 已在服务这些路由，且有 `angel_heart` 可抄。
-4. **V3 的排班表上传**：`astrbot/api/web.py` 的 `PluginUploadFile` + `request.files()` 在 4.28.1 已存在。
+4. **V3 的排班表上传**：`astrbot/api/web.py` 的 `PluginUploadFile` + `request.files()` 在 4.28.1 **确实存在**——**但它在插件 Pages 的 bridge 上根本递不过去**。
+
+   > ⚠️ **2026-09-29 线上实测修正（务必先读这条，否则会照着上面那句再走一遍弯路）**
+   >
+   > 插件 Pages 的 bridge 用 `postMessage` 与父页面通信，而 **`FormData` 不能被结构化克隆**，在真实浏览器里直接抛
+   > `Failed to execute 'postMessage' on 'Window': FormData object could not be cloned.`
+   > 文件**永远到不了后端**。
+   >
+   > **可用做法**：前端用 `FileReader.readAsDataURL` 把文件读成 base64（切掉 `data:` 前缀），走**普通 JSON POST**（`bridge.apiPost(endpoint, { filename, content_b64 })`），后端解码后再校验。
+   > 代价是体积约 ×1.37；我们实测排班表 15~30KB，完全可接受。
+   >
+   > **为什么可以确信这条能走**：配置写回走的是**同一座 bridge 的同一套 `apiPost(纯对象)`**，而那条路已在页面上成功使用过。唯一不可用的 `FormData` 已经拿掉。
+   >
+   > 体积上限要**按解码后的字节算**，且解码前先按 base64 长度做一次廉价拒绝——否则「防大文件」的校验逻辑自己就会把大字符串吃进内存。
 5. **集成其他插件**（用户新提的方向）：`context.get_registered_star("astrbot_plugin_maa").star_cls` 可以拿到实例，但要判 `activated` 且 `star_cls is not None`；`qzone` 被 `daily_sharing` 调用就是先例。**但这是软依赖，对方插件没装/未激活时必须降级。**
 
 ## 5.1 跨插件机制专章（应要求回查官方文档确认）
