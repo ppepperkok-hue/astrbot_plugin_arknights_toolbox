@@ -53,7 +53,7 @@ MAA 每跑完一次基建任务就把内部计划索引**永久前进一格**（
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Any
 
@@ -112,6 +112,20 @@ DEFAULT_FETCHED_TTL_MINUTES = 240
 #: TTL 的上限。给一个上限而不是任意整数，是为了让「毫秒写成 30000」这类手滑
 #: 当场被拒，而不是变成一个 20 天都不会过期的任务。
 MAX_TTL_MINUTES = 7 * 24 * 60
+
+#: 逐次轮询不写 INFO，改为每一段时间最多一条摘要。
+#:
+#: **为什么必须节流**：MAA 按协议**每秒**来一次，一次一条 INFO 就是一天 86400 条。
+#: 后果不止是吵——「首次收到请求」「任务被取走」「回报到达」「超时作废」这些**真正
+#: 需要看见的事**会被埋在同一秒一条的心跳里，而服务器上的容器日志没有轮转保证。
+#:
+#: **为什么不是直接删掉**：这个模块的价值之一就是「看得出 MAA 还连着没有」。
+#: 所以逐次降为 DEBUG（默认不输出，排查时可开），而 INFO 留给三件事：
+#: 首次到达、周期性摘要、以及所有真正的事件（那些在别处的调用点，**不受本限流影响**）。
+#:
+#: 一小时是权衡后的取值：一天最多 24 条摘要，既撑不起噪音，又能让「昨晚它还在连吗」
+#: 这类问题在日志里直接看得到。
+HEARTBEAT_INTERVAL_SECONDS = 3600
 
 
 def _parse_minutes(config: Mapping[str, Any], key: str, default: int, *, what: str) -> int:
@@ -198,6 +212,16 @@ class MaaModule(Module):
         self._last_summary = ""
         self._last_body_shape = ""
         self._last_status = ""
+
+        #: 日志节流状态。逐次轮询走 DEBUG，INFO 只留首次与周期性摘要。
+        #: 上一次摘要的时刻与「那之后又来了多少请求」，两个一起才能说出
+        #: 「过去 N 分钟收到 M 次」这种可用的话，而不是干巴巴一句「还在连」。
+        self._heartbeat_at: datetime | None = None
+        self._heartbeat_arrivals = 0
+
+        #: 时钟**可注入**，只为让节流的测试不必 sleep。
+        #: 生产路径下它恒等于 `datetime.now`，没有任何行为差异。
+        self._now: Callable[[], datetime] = datetime.now
 
     # --- 生命周期 -----------------------------------------------------------
 
@@ -629,7 +653,21 @@ class MaaModule(Module):
     # --- 记录 ---------------------------------------------------------------
 
     def _record(self, kind: str, payload: object) -> None:
-        """记下这次到达。**只记形状，不记值**（渲染全在 `protocol` 那一层）。"""
+        """记下这次到达。**只记形状，不记值**（渲染全在 `protocol` 那一层）。
+
+        **日志分档（节流）**：MAA 每秒来一次，逐次写 INFO 会变成一天 86400 条，
+        把「首次连接」「任务被取走」「回报到达」「超时作废」这些**真正要看见的事**
+        全埋掉。所以这里：
+
+        * **首次到达** → INFO（它是「公网可达 + 证书被接受 + 轮询已开始」的
+          唯一证据，也是这个模块最初存在的理由）；
+        * **每满一段时间** → INFO 一条摘要，回答「它还连着吗」；
+        * **其余每一次** → DEBUG，排查时可开，平时不出声。
+
+        ⚠️ **限流只覆盖这一处**。任务派发、取走、回报、作废、停止指令、任何
+        ERROR 都在各自的调用点记日志，**一条都不会被这里吃掉**——那是本模块的
+        可观测性底线。
+        """
         body_shape = protocol.describe_payload(payload)
         summary = protocol.describe_request(
             kind=kind,
@@ -639,8 +677,10 @@ class MaaModule(Module):
             user_agent=_header("user-agent"),
         )
 
+        now = self._now()
         self._arrivals += 1
-        self._last_seen = datetime.now()
+        self._heartbeat_arrivals += 1
+        self._last_seen = now
         self._last_summary = summary
         self._last_body_shape = body_shape
         if kind == protocol.GET_TASK_KIND:
@@ -656,7 +696,26 @@ class MaaModule(Module):
                 "[ak_toolbox][maa] ✅ 首次收到 MAA 请求，连接是通的"
                 "（公网可达 + 证书被接受 + 轮询已开始）。"
             )
-        logger.info("[ak_toolbox][maa] 收到请求：%s；请求体 %s", summary, body_shape)
+            # 从这一刻开始计周期；紧接着的那一次不进摘要（首次那条已经报告了它）。
+            self._heartbeat_at = now
+            self._heartbeat_arrivals = 0
+        elif self._heartbeat_at is None:
+            # 理论上到不了（首次必设基准）。真到得了也不能沉默——用当下当基准，
+            # 一个周期之后就会开始出摘要，而不是永远不出。
+            self._heartbeat_at = now
+        elif (now - self._heartbeat_at).total_seconds() >= HEARTBEAT_INTERVAL_SECONDS:
+            logger.info(
+                "[ak_toolbox][maa] 持续连接中：过去约 %d 分钟收到 %d 次请求"
+                "（累计 %d 次；最近一次 %s）。",
+                int((now - self._heartbeat_at).total_seconds() // 60),
+                self._heartbeat_arrivals,
+                self._arrivals,
+                now.strftime("%m-%d %H:%M:%S"),
+            )
+            self._heartbeat_at = now
+            self._heartbeat_arrivals = 0
+
+        logger.debug("[ak_toolbox][maa] 收到请求：%s；请求体 %s", summary, body_shape)
 
     def _note_failure(self, kind: str, exc: BaseException) -> None:
         self._failures += 1

@@ -120,12 +120,16 @@ def _patch_request(
     )
 
 
-def _collect_logs(monkeypatch) -> list[str]:
+def _collect_logs(monkeypatch, *, debug: list[str] | None = None) -> list[str]:
     """收集日志，并**按 `%` 模板渲染**。
 
     为什么要渲染：stub logger 只记录参数，不做格式化。若直接把参数拼起来，
     断言里看到的会是 `处理%s请求时出错` 这个**模板串**，而不是真实文案——
     那样断言就永远对不上，而人只会以为"消息没记"。
+
+    `debug` 单独收：逐次轮询已降到 DEBUG。它**必须被 stub**（否则会打到真实
+    logger，测试输出里多出一堆噪音），但**默认不混进返回值**——否则"INFO 条数
+    有上界"这类断言就失去意义了。需要看它时显式传一个列表进来。
     """
     messages: list[str] = []
 
@@ -146,6 +150,13 @@ def _collect_logs(monkeypatch) -> list[str]:
             level,
             lambda *args, _m=messages, **kwargs: _m.append(_render(args)),
         )
+
+    debug_sink = debug if debug is not None else []
+    monkeypatch.setattr(
+        maa_module.logger,
+        "debug",
+        lambda *args, _m=debug_sink, **kwargs: _m.append(_render(args)),
+    )
     return messages
 
 
@@ -268,7 +279,14 @@ def test_first_arrival_is_logged_prominently(monkeypatch) -> None:
 
 
 def test_arrival_is_logged_with_method_path_and_user_agent(monkeypatch) -> None:
-    messages = _collect_logs(monkeypatch)
+    """每次到达的**细节**仍在，只是移到了 DEBUG 档。
+
+    MAA 每秒来一次，这些逐条细节写在 INFO 就是一天 86400 条，会把真正要看见的
+    事情埋掉。所以级别降了——**但信息一条没少**：排查时打开 DEBUG 依然能看到
+    来源 IP、UA、方法与路径。这条断言钉的正是后半句，**"降级"不等于"删除"**。
+    """
+    debug: list[str] = []
+    messages = _collect_logs(monkeypatch, debug=debug)
     instance, _registered, _sent = _boot(monkeypatch)
     _patch_request(
         monkeypatch,
@@ -279,10 +297,13 @@ def test_arrival_is_logged_with_method_path_and_user_agent(monkeypatch) -> None:
 
     asyncio.run(instance._web_get_task())
 
-    joined = "\n".join(messages)
-    assert "MAA/6.18.0" in joined
-    assert "getTask" in joined
-    assert "203.0.113.7" in joined
+    joined = "\n".join(debug)
+    assert "MAA/6.18.0" in joined, debug
+    assert "getTask" in joined, debug
+    assert "203.0.113.7" in joined, debug
+
+    # 而 INFO 档不该再出现逐次细节——这条防止有人"顺手"把它升回去。
+    assert "MAA/6.18.0" not in "\n".join(messages), messages
 
 
 # --- 异常路径：给 MAA 明确响应，不许静默 --------------------------------
