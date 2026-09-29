@@ -34,6 +34,18 @@ ban-relative-imports = "parents"
 # 装配层允许父级相对导入：插件以包形式被 AstrBot 加载时 `core` 不在 sys.path，
 # `from ..core.x import y` 是唯一可达方式（审查/裁定见 docs/architecture/extension.md §2）。
 "modules/*/module.py" = ["TID", "TID252"]
+# **纯转出壳**（只把 core 的符号再导出、不含实现）用与装配层**同一套**回退链，
+# 因此同样需要父级相对导入那一支（见 docs/architecture/extension.md §4.1）。
+#
+# 为什么逐文件写具体路径、而**不**用 `modules/*/schedule.py` 之类的通配：
+# `schedule.py` 是个"看起来就该放排班逻辑"的名字。哪天某个模块真在这个文件里写实现，
+# 通配豁免会**静默地**连它一起放开——本项目反复吃过「静默生效/静默失效」的亏
+# （rules.md §2；2026-09-29 的多次事故）。一行一个文件意味着新增壳时必须在这里
+# **显式加一行**，评审看得见，也就会回头读这段理由。
+#
+# 判据（extension.md §4.1）：壳里只有 import 与 `__all__`、没有任何计算；
+# 对象级证据是 tests/test_core_shifts.py 的「同一批对象」断言。
+"modules/shift_reminder/schedule.py" = ["TID", "TID252"]
 "tests/*" = ["TID", "SIM"]
 
 [lint.isort]

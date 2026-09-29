@@ -25,13 +25,24 @@ from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 try:  # pragma: no cover - 走哪支取决于运行场景，两支都是真实路径
     from core.module import Module
     from core.permission import session_allowed
+    from core.shifts import (
+        SHIFT_SLOTS,
+        ConfigError,
+        ShiftTable,
+        parse_shift_table,
+    )
     from core.storage import JsonlSendLog, JsonStateStore, SendRecord
 except ImportError:  # pragma: no cover
     from ...core.module import Module
     from ...core.permission import session_allowed
+    from ...core.shifts import (
+        SHIFT_SLOTS,
+        ConfigError,
+        ShiftTable,
+        parse_shift_table,
+    )
     from ...core.storage import JsonlSendLog, JsonStateStore, SendRecord
 from . import avatars, notify, roster, scheduler, webapi
-from .schedule import ConfigError, Shift, ShiftTable, parse_hhmm, validate
 from .schedule_file import ScheduleFileError, parse_schedule_file
 from .strategy import PeriodStrategy
 
@@ -51,7 +62,6 @@ UPLOAD_FILENAME = "uploaded_schedule.json"
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024
 DEFAULT_TIMEZONE = "Asia/Shanghai"
 TIMEZONE_KEY = "timezone"
-SHIFT_SLOTS = (1, 2, 3)
 SEND_LOG_KEEP = 50
 STATUS_RECENT = 5
 DEFAULT_LEAD_MINUTES = 10
@@ -61,32 +71,16 @@ DEFAULT_LEAD_MINUTES = 10
 COMMAND_NAMES = ("bind", "status", "test", "import")
 
 
-def parse_shift_table(config: Mapping[str, Any]) -> ShiftTable:
-    """把扁平配置键组装成**已校验**的班次表。
-
-    配置非法一律抛 `ConfigError`——加载失败要让人当场看见，不静默降级
-    （项目宪法 §2 第 2 条）。
-    """
-    shifts: list[Shift] = []
-    for slot in SHIFT_SLOTS:
-        prefix = f"shift_{slot}"
-        name = config.get(f"{prefix}_name")
-        start = config.get(f"{prefix}_start")
-        hours = config.get(f"{prefix}_hours")
-        if not isinstance(name, str) or not name.strip():
-            raise ConfigError(f"{prefix}_name 必须是非空字符串，收到 {name!r}")
-        if not isinstance(start, str):
-            raise ConfigError(f"{prefix}_start 必须是 HH:MM 字符串，收到 {start!r}")
-        if isinstance(hours, bool) or not isinstance(hours, int):
-            raise ConfigError(f"{prefix}_hours 必须是整数小时数，收到 {hours!r}")
-        shifts.append(
-            Shift(
-                name=name.strip(),
-                start_minute=parse_hhmm(start),
-                duration_minutes=hours * 60,
-            )
-        )
-    return validate(shifts)
+# `parse_shift_table` 原先定义在这里，已移入 `core/shifts.py`（单一事实来源）：
+# 「从配置里读出三班」是共享概念，`maa` 也要按同一套规则判断"什么叫合法配置"，
+# 两边各写一份的话，判别分叉的代价是它在错误的时刻询问用户。
+# 这里仍把名字留在本模块命名空间里（上面的 import），既有调用方与测试不受影响。
+#
+# 以下两个函数**刻意留在本模块**，它们不属于共享的"班次模型"：
+#   * `parse_shift_order` 只服务于「排班表的 plans 下标 ↔ 配置顺序」这层桥接，
+#     是排班表（roster）相关的事；
+#   * `parse_lead_minutes` 只被提醒自己的调度用（提前多久推送）；`maa` 是在
+#     **换班时刻**询问，不用提前量。
 
 
 def parse_shift_order(config: Mapping[str, Any]) -> tuple[str, ...]:

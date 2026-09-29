@@ -104,6 +104,36 @@ class Module(ABC):
 | 需要新的外部依赖或凭据 | 先回到技术栈流程评估依赖与许可证，再动手 |
 | 要引入 AGPL / 无 LICENSE 代码 | **红线，禁止**（见技术栈 C2） |
 
+### 4.1 共享的**纯逻辑**放进 `core/` 之后，两边怎么取用（2026-09-29）
+
+「共享逻辑抽到 `core/`」有一个 §2、§3 都没写到的细节：放进去的是**纯逻辑**
+（例如 `core/shifts.py` 的班次模型），而**纯逻辑文件不许 import `core`**
+（§3 第一条）。两条规则合在一起，取用方式按调用方分两种：
+
+| 调用方 | 怎么取 | 为什么 |
+| --- | --- | --- |
+| **装配层** `modules/*/module.py` | 既有的「`try: from core.x import y` / `except ImportError: from ...core.x import y`」回退链 | 它是框架胶水层，`ruff` 已豁免它的父级相对导入；两种运行场景都要能 import 得动 |
+| **纯逻辑** `modules/<名>/*.py` | 经由同模块内的**薄壳**取用：壳里用**与装配层完全相同**的回退链（`try: from core.x import y` / `except ImportError: from ...core.x import y`），**转出名字，不含实现**（样例：`modules/shift_reminder/schedule.py`） | 纯逻辑不能随手写父级相对导入，而 `core` 在 AstrBot 的加载形态下又不是顶层包；两种场景正好由回退链的两支各覆盖一支 |
+
+> **2026-09-29 修订（F6）**：本表原先写的第二种取法是「壳里按包名前缀解析出
+> `core.<模块>` 再 `importlib.import_module`」——那是 F5 为解决"纯逻辑不能 import
+> `core`"临时造的手法，**已废止**，理由：
+>
+> 1. **新造机制要谨慎**（§5 反模式）。回退链是本项目既有模式（`main.py`、各
+>    `modules/*/module.py` 都在用），`importlib` 按包名剥层是这次新造的；
+> 2. **它更脆**：按包名剥层依赖包结构，而回退链只依赖"绝对能不能 import 成功"。
+>
+> 为让壳也能写父级相对导入，`ruff.toml` 里给它**逐文件**开了豁免
+> （`"modules/shift_reminder/schedule.py" = ["TID", "TID252"]`）——**刻意不用
+> `modules/*/schedule.py` 之类的通配**：那是个"看起来就该放逻辑"的名字，通配会让
+> 将来某个模块的真实现被**静默**放开。
+
+**判断「薄壳写得对不对」的判据**：壳里**只有 import 与 `__all__`，没有任何计算**——
+一旦壳里出现第二个 `def validate(...)`，就说明又长出了第二份实现。另外用身份断言钉住
+（`tests/test_core_shifts.py::test_module_schedule_is_the_same_objects_as_core`）：
+`modules.shift_reminder.schedule.Shift is core.shifts.Shift` 必须为真——否则两边是
+**不同的类**，`isinstance` 与异常捕获会开始出诡异问题。
+
 ## 5. 预留的三处插槽由谁填
 
 | 插槽 | 定义位置 | 谁填 |
