@@ -483,7 +483,24 @@ class ShiftReminderModule(Module):
             lead_minutes=self._lead_minutes,
             extra=self._roster_extra(snapshot.current),
         )
-        sent = await self._ctx.send_message(umo, MessageChain().message(text))
+
+        try:
+            sent = await self._ctx.send_message(umo, MessageChain().message(text))
+        except Exception as exc:  # noqa: BLE001 - 见下方注释：异常同样是失败，不是崩溃
+            # 平台离线时 `send_message` 会**抛异常**，而不是返回 `False`。
+            # 只处理返回值的版本会漏掉这种失败：熔断计数永不增长（熔断形同虚设）、
+            # `sends.jsonl` 里看不到这次失败、用户查 `/ak status` 完全不知情，
+            # 而异常冒泡到 cron 层只会让 AstrBot 记一条 error——插件自己的状态
+            # 依然干净（2026-09-29 线上事故）。所以这里走**同一条失败路径**。
+            #
+            # `detail` 只带异常类型与消息：本地异常字符串不含凭据，且排查时最有价值。
+            self._record_push_failure(
+                send_log,
+                now,
+                shift_name,
+                f"send_message 抛异常：{type(exc).__name__}: {exc}",
+            )
+            return
 
         if sent:
             store.set(key, True)
@@ -492,7 +509,21 @@ class ShiftReminderModule(Module):
             logger.info("[ak_toolbox][shift_reminder] 已推送 %s 的换班提醒", shift_name)
             return
 
-        detail = "send_message 返回 False（没找到匹配的平台或会话）"
+        self._record_push_failure(
+            send_log,
+            now,
+            shift_name,
+            "send_message 返回 False（没找到匹配的平台或会话）",
+        )
+
+    def _record_push_failure(
+        self, send_log: Any, now: datetime, shift_name: str, detail: str
+    ) -> None:
+        """记一次推送失败：发送记录、熔断计数、日志——三条都不能少。
+
+        抽出来是为了让「返回 False」与「抛异常」两种失败形态**走同一条路径**，
+        不会因为将来只改其中一处而再次漏掉计数。
+        """
         send_log.append(SendRecord(at=now, shift=shift_name, ok=False, detail=detail))
         self._breaker.record_failure()
         logger.warning("[ak_toolbox][shift_reminder] 推送失败：%s", detail)
@@ -525,7 +556,19 @@ class ShiftReminderModule(Module):
         return True
 
     async def _reply(self, event: Any, text: str) -> None:
-        sent = await self._ctx.send_message(event.unified_msg_origin, MessageChain().message(text))
+        """给指令发起者回一条消息。
+
+        平台离线时 `send_message` 会抛异常。这里**必须包住**：回执发不出去只是遗憾，
+        异常冒泡上去会让整个指令 handler 失败——用户发 `/ak status` 结果什么反应
+        都没有，比「收到一句失败提示」更糟（2026-09-29 事故的同类路径）。
+        """
+        try:
+            sent = await self._ctx.send_message(
+                event.unified_msg_origin, MessageChain().message(text)
+            )
+        except Exception:  # noqa: BLE001 - 回执失败不冒泡，留痕即可
+            logger.exception("[ak_toolbox][shift_reminder] 回执发送异常（平台可能已离线）")
+            return
         if not sent:
             logger.warning("[ak_toolbox][shift_reminder] 回执发送失败：%s", text)
 
@@ -548,9 +591,15 @@ class ShiftReminderModule(Module):
             lead_minutes=self._lead_minutes,
             extra=self._roster_extra(snapshot.current),
         )
-        sent = await self._ctx.send_message(
-            event.unified_msg_origin, MessageChain().message(f"[测试]\n{text}")
-        )
+        try:
+            sent = await self._ctx.send_message(
+                event.unified_msg_origin, MessageChain().message(f"[测试]\n{text}")
+            )
+        except Exception:  # noqa: BLE001 - 见 _reply：指令路径的发送失败不该冒泡
+            # 注意：`/ak test` 是**发给发起者**的即时消息，不是计划推送，
+            # 因此不计入熔断（熔断的语义是「这个平台的提醒一直送不到」）。
+            logger.exception("[ak_toolbox][shift_reminder] /ak test 发送异常（平台可能已离线）")
+            return
         if not sent:
             logger.warning("[ak_toolbox][shift_reminder] /ak test 发送失败")
 

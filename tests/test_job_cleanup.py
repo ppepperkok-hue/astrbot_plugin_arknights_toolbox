@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -329,3 +330,113 @@ def test_roster_extra_returns_none_without_import(monkeypatch, tmp_path):
 
     current = module._strategy.table.shifts[0]
     assert module._roster_extra(current) is None
+
+
+# --- 推送失败路径（2026-09-29 线上事故的回归护栏） ---------------------------
+
+
+class FakeCtx:
+    """够用的假 Context：只实现本模块真正用到的那样东西（`send_message`）。
+
+    可以配置成「抛异常」或「返回 False」，用来分别演练两种失败形态——
+    线上事故正是**抛异常**那种（QQ 号掉线）。
+    """
+
+    def __init__(self, *, raises=None, returns=True):
+        self.cron_manager = FakeCronManager([])
+        self.sent = []
+        self._raises = raises
+        self._returns = returns
+
+    async def send_message(self, umo, chain):
+        if self._raises is not None:
+            raise self._raises
+        self.sent.append((umo, chain))
+        return self._returns
+
+
+def _module_ready_to_push(monkeypatch, tmp_path, ctx):
+    """装好模块并绑定提醒目标：让 `_push` 能走到真正发送那一步。"""
+    monkeypatch.setattr(reminder_module, "get_astrbot_plugin_data_path", lambda: str(tmp_path))
+    module = ShiftReminderModule()
+    asyncio.run(module.initialize(ctx, CONFIG))
+    module._set_target("test:FriendMessage:10001")
+    return module
+
+
+def test_push_records_failure_when_send_message_raises(monkeypatch, tmp_path):
+    """`send_message` **抛异常**时也要走失败路径，而不是崩出去。
+
+    线上事故（2026-09-29 07:50）：QQ 号掉线，`send_message` 抛异常，而 `_push`
+    只处理了「返回 False」那一支。后果是熔断计数永不增长（熔断形同虚设）、
+    `sends.jsonl` 里看不到这次失败、用户毫无提示。
+    """
+    ctx = FakeCtx(raises=RuntimeError("平台已离线"))
+    module = _module_ready_to_push(monkeypatch, tmp_path, ctx)
+
+    asyncio.run(module._push("夜班"))  # 断言点之一：不许把异常抛出来
+
+    records = module._send_log.recent(5)
+    assert len(records) == 1
+    assert records[0].ok is False
+    assert records[0].shift == "夜班"
+    # detail 要带异常类型与消息——排查时就靠这两个
+    assert "RuntimeError" in records[0].detail
+    assert "平台已离线" in records[0].detail
+    # 熔断计数必须涨，否则它永远不会打开
+    assert module._breaker.consecutive_failures == 1
+
+
+def test_push_failure_does_not_write_idempotency_key(monkeypatch, tmp_path):
+    """失败**不能**留下幂等键。
+
+    这是最要紧的一条：幂等键的语义是「这次换班已经通知过了」。若失败也写键，
+    这次换班提醒就被永久标记为已发——用户再也不会收到它，而且任何日志都看不出
+    「漏了一次」。
+    """
+    ctx = FakeCtx(raises=RuntimeError("平台已离线"))
+    module = _module_ready_to_push(monkeypatch, tmp_path, ctx)
+
+    asyncio.run(module._push("夜班"))
+    asyncio.run(module._push("夜班"))
+
+    # 幂等键没被写 → 第二次仍走失败记录（若被写了，第二次会静默跳过、只剩 1 条）
+    assert len(module._send_log.recent(5)) == 2
+    assert module._breaker.consecutive_failures == 2
+
+    # 直接证据：状态文件里只有绑定目标，没有任何幂等键
+    state_files = list(tmp_path.rglob("state.json"))
+    assert len(state_files) == 1, f"期望恰好一个状态文件，实际 {state_files}"
+    state = json.loads(state_files[0].read_text(encoding="utf-8"))
+    assert set(state) == {"bound_umo"}, f"失败不该写幂等键，实际键：{set(state)}"
+
+
+def test_push_returning_false_still_takes_the_same_path(monkeypatch, tmp_path):
+    """原有路径不许回归：返回 `False` 仍要记录 + 计失败。"""
+    ctx = FakeCtx(returns=False)
+    module = _module_ready_to_push(monkeypatch, tmp_path, ctx)
+
+    asyncio.run(module._push("夜班"))
+
+    records = module._send_log.recent(5)
+    assert len(records) == 1
+    assert records[0].ok is False
+    assert "返回 False" in records[0].detail
+    assert module._breaker.consecutive_failures == 1
+
+
+def test_successful_push_still_writes_key_and_clears_breaker(monkeypatch, tmp_path):
+    """成功路径不许被这次改动影响：写幂等键、清熔断计数。"""
+    ctx = FakeCtx(returns=True)
+    module = _module_ready_to_push(monkeypatch, tmp_path, ctx)
+    module._breaker.record_failure()
+
+    asyncio.run(module._push("夜班"))
+
+    records = module._send_log.recent(5)
+    assert len(records) == 1
+    assert records[0].ok is True
+    assert module._breaker.consecutive_failures == 0
+    # 幂等键写了 → 再推一次会被跳过，不再新增记录
+    asyncio.run(module._push("夜班"))
+    assert len(module._send_log.recent(5)) == 1
