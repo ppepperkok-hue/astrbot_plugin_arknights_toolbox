@@ -71,7 +71,9 @@ from dataclasses import dataclass, field
 from typing import Any, Final, Protocol
 
 __all__ = [
+    "ALREADY_SIGNED_MARKERS",
     "APP_CODE_SKLAND",
+    "ARKNIGHTS_GAME_ID",
     "BINDING_APP_ARKNIGHTS",
     "HONEST_USER_AGENT",
     "HYPERGRYPH_BASE",
@@ -86,10 +88,12 @@ __all__ = [
     "SklandRateLimited",
     "SklandTransportError",
     "SklandUnauthorized",
+    "already_signed_in",
     "arknights_uid",
     "binding_app_codes",
     "describe_structure",
     "sign_headers",
+    "sign_in_awards",
 ]
 
 #: 通行证侧（扫码、换 token）的基础地址。
@@ -110,6 +114,17 @@ CODE_SUCCESS: Final[int] = 0
 CODE_BAD_CRED: Final[int] = 10000
 CODE_BAD_PARAM: Final[int] = 10001
 CODE_NOT_LOGGED_IN: Final[int] = 10002
+
+#: `gameId` 的取值：明日方舟 = 1。
+#: 三个参考实现（Morizero1125 MIT、Siq5005 MIT、qihang518887）都用它，
+#: 而 Morizero 的默认参数就是 `game_id: int = 1`。
+ARKNIGHTS_GAME_ID: Final[int] = 1
+
+#: 服务端在「今天已经签过」时**也用 10001**（与参数错误同码），只能靠 message 区分。
+#: 出处：Morizero1125 `skland_auth.py:215-216` 的注释——
+#: 「重复签到返回 code=10001（message 含「重复签到」），与凭证失效同码」。
+#: 不区分它，用户签过一次之后会一直看到「参数错误」。
+ALREADY_SIGNED_MARKERS: Final[tuple[str, ...]] = ("已签到", "重复签到", "已经签到")
 
 
 class SklandError(Exception):
@@ -411,6 +426,55 @@ def describe_structure(
 BINDING_APP_ARKNIGHTS: Final[str] = "arknights"
 
 
+def already_signed_in(payload: Any) -> bool:
+    """这个响应是不是「今天已经签过了」。
+
+    为什么必须单独判：服务端在**重复签到**时也返回 `code=10001`，
+    与「参数错误」**同码**（出处见 :data:`ALREADY_SIGNED_MARKERS` 的注释）。
+    不区分它，用户签过一次之后每次都会看到「参数错误」，然后去查一个并不存在的 bug。
+
+    判据只认服务端自己的措辞——**不去猜别的字段**。判不出来就返回 `False`，
+    让调用方按真正的错误处理（宁可报错，不要假装成功）。
+    """
+    if not isinstance(payload, Mapping):
+        return False
+    message = payload.get("message")
+    if not isinstance(message, str):
+        return False
+    return any(marker in message for marker in ALREADY_SIGNED_MARKERS)
+
+
+def sign_in_awards(payload: Any) -> list[str]:
+    """从签到响应里取出奖励文案，例如 `["合成玉x200", "龙门币x5000"]`。
+
+    结构取自参考实现（`Siq5005/core_skland.py:764-767` 与
+    `qihang518887/skland_api.py:456-457`）：`data.awards[]`，每项
+    `{resource: {name}, count}`。
+
+    ⚠️ **成功响应体本身仍未经真机验证**（§9.5）。所以这里**取不到就返回空列表**，
+    由调用方如实说「签到了，但没读到奖励明细」——**不编一个奖励数字**。
+    """
+    if not isinstance(payload, Mapping):
+        return []
+    data = payload.get("data")
+    if not isinstance(data, Mapping):
+        return []
+    awards = data.get("awards")
+    if not isinstance(awards, list):
+        return []
+    out: list[str] = []
+    for award in awards:
+        if not isinstance(award, Mapping):
+            continue
+        resource = award.get("resource")
+        name = resource.get("name") if isinstance(resource, Mapping) else None
+        if not isinstance(name, str) or not name:
+            continue
+        count = award.get("count")
+        out.append(f"{name}x{count}" if isinstance(count, int) else name)
+    return out
+
+
 def binding_app_codes(payload: Any) -> list[str]:
     """响应里出现过哪些 `appCode`（按出现顺序，去重）。
 
@@ -689,14 +753,27 @@ class SklandClient:
         """
         return self._call("GET", f"{ZONAI_BASE}/game/player/binding")
 
-    def sign_in(self) -> dict[str, Any]:
-        """每日签到。实测该路由存在（无凭据时返回 401/10002）。
+    def sign_in(self, uid: str, game_id: int = ARKNIGHTS_GAME_ID) -> dict[str, Any]:
+        """每日签到。
+
+        **请求形态已由三个参考实现一致确认**（Morizero1125 `skland_auth.py:212-219`、
+        Siq5005 `core_skland.py:752-757`、qihang518887 `skland_api.py:434-443`）：
+
+        ```
+        POST {ZONAI_BASE}/game/attendance
+        body {"gameId": <int>, "uid": <str>}
+        ```
+
+        真机教训：本方法原先**不带任何参数**，服务端回 `10001`（参数错误）——
+        `uid` 与 `gameId` 是必填的。签到是**账号级**操作，服务端需要知道给谁签。
 
         Note:
-            `UNVERIFIED`：**请求方法与成功响应体未经真实授权验证**——没有一次真机扫码就
-            无法验证。失败会被如实抛出，不会静默当成功。
+            `UNVERIFIED`：**成功响应体仍未经真实授权验证**。参考实现读的是
+            `data.awards[]`（每项 `{resource: {name}, count}`），但本项目不在
+            api 层解析业务字段——结构由调用方按需读取，读不到就如实报。
         """
-        return self._call("POST", f"{ZONAI_BASE}/game/attendance")
+        body = {"gameId": game_id, "uid": uid}
+        return self._call("POST", f"{ZONAI_BASE}/game/attendance", body=body)
 
     def player_info(self, uid: str) -> dict[str, Any]:
         """玩家信息。实测该路由存在（缺 `uid` → 10001；带 `uid` 无凭据 → 10002）。

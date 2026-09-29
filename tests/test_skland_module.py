@@ -619,3 +619,114 @@ def test_scan_login_sends_a_qr_code_image(data_root: Path) -> None:
     assert module._login_task is not None
     module._login_task.cancel()
     asyncio.run(module.terminate())
+
+
+# --- 签到（真机 10001 的回归护栏） ------------------------------------------
+
+
+def _signin_module(
+    data_root: Path, attendance: api.HttpResponse
+) -> tuple[SklandModule, _FakeCtx, list[tuple[str, str, bytes | None]]]:
+    """建一个已授权模块，并把 `/game/attendance` 的响应固定住。"""
+    module, ctx = SklandModule(), _FakeCtx()
+    _init(module, ctx)
+    calls: list[tuple[str, str, bytes | None]] = []
+
+    def transport(method: str, url: str, headers: Any, body: bytes | None) -> api.HttpResponse:
+        calls.append((method, url, body))
+        if "player/binding" in url:
+            return _cred_ok(
+                {"list": [{"appCode": "arknights", "bindingList": [{"uid": "1101234567"}]}]}
+            )
+        if "attendance" in url:
+            return attendance
+        raise AssertionError(f"没预备这个地址：{url}")
+
+    module._client = api.SklandClient(transport=transport)
+    module._client.update_credentials("CRED-1", "TOKEN-1")
+    return module, ctx, calls
+
+
+def test_signin_sends_the_uid_and_reports_awards(data_root: Path) -> None:
+    """签到要带上 `uid`，并把服务端给的奖励念出来。
+
+    真机教训：不带参数时服务端回 `10001`（参数错误）——签到时服务端必须知道给谁签。
+    """
+    payload = {"code": 0, "data": {"awards": [{"resource": {"name": "合成玉"}, "count": 200}]}}
+    module, ctx, calls = _signin_module(
+        data_root, api.HttpResponse(status=200, body=json.dumps(payload).encode())
+    )
+
+    # `_do_signin` 返回一句话，由调用方发出去——所以断言返回值，不是 ctx.sent
+    text = asyncio.run(module._do_signin())
+
+    attendance = [c for c in calls if "attendance" in c[1]]
+    assert len(attendance) == 1, "签到必须真的发出请求"
+    _, url, body = attendance[0]
+    assert body is not None, "签到必须带 body，否则服务端回 10001"
+    sent = json.loads(body)
+    assert sent["gameId"] == 1
+    assert sent["uid"] == "1101234567", "uid 取自绑定信息，不能编"
+    assert url.endswith("/api/v1/game/attendance")
+
+    assert "签到成功" in text
+    assert "合成玉x200" in text
+
+
+def test_signin_when_already_done_is_not_reported_as_a_param_error(data_root: Path) -> None:
+    """**重复签到也用 10001**，必须靠服务端措辞区分——否则用户会去查一个不存在的 bug。
+
+    这是本方法上一版的真实行为：签过一次之后，每次都说「参数错误」。
+    """
+    payload = {"code": 10001, "message": "今天已经签到过了", "data": None}
+    module, ctx, _ = _signin_module(
+        data_root, api.HttpResponse(status=400, body=json.dumps(payload).encode())
+    )
+
+    text = asyncio.run(module._do_signin())
+
+    assert "已经签过" in text
+    assert "参数错误" not in text, "重复签到不该被说成参数错误"
+
+
+def test_signin_failure_is_still_reported_as_failure(data_root: Path) -> None:
+    """真正的参数错误仍要报失败——**不许放宽校验**，也不许说成「可能成功了」。"""
+    payload = {"code": 10001, "message": "参数错误", "data": None}
+    module, ctx, _ = _signin_module(
+        data_root, api.HttpResponse(status=400, body=json.dumps(payload).encode())
+    )
+
+    text = asyncio.run(module._do_signin())
+
+    assert "失败" in text
+    assert "签到成功" not in text, "不许给出含糊的成功暗示"
+
+
+def test_command_exception_is_caught_and_explained(data_root: Path) -> None:
+    """**指令异常不许冒到宿主**：宿主只会打一段栈 +「出现异常」，用户看不懂。
+
+    这里用一条未预备地址触发一个真异常（假传输抛 `AssertionError`），断言
+    ① `handle_command` 不把它抛出去；② 用户收到一句带原因的话；③ 日志里有记录。
+    """
+    module, ctx = SklandModule(), _FakeCtx()
+    _init(module, ctx)
+
+    def transport(method: str, url: str, headers: Any, body: bytes | None) -> api.HttpResponse:
+        if "player/binding" in url:
+            return _cred_ok({"list": [{"appCode": "arknights", "bindingList": [{"uid": "1"}]}]})
+        raise RuntimeError("模拟一个没人预料到的内部错误")
+
+    module._client = api.SklandClient(transport=transport)
+    module._client.update_credentials("CRED-1", "TOKEN-1")
+
+    event = _Event()
+    event.message_str = "/ak skland signin"
+    returned = _say(module, event)  # 不许抛
+
+    assert returned is True, "异常被兜住后仍要表示「这条指令我处理了」"
+    joined = "\n".join(ctx.sent)
+    assert "出错" in joined, "要给用户一句能看懂的话"
+    assert "RuntimeError" in joined, "要带上异常类型，用户才能把它原样报回来"
+    # 凭据红线：兜底文案不许把凭据带出去
+    assert "CRED-1" not in joined
+    assert "TOKEN-1" not in joined

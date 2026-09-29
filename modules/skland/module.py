@@ -292,15 +292,49 @@ class SklandModule(Module):
         return self._client is not None and self._client.has_credentials
 
     async def _do_signin(self) -> str:
-        """执行一次签到并返回一句人话结果。"""
+        """执行一次签到并返回一句人话结果。
+
+        签到需要 `uid`（账号级操作，服务端要知道给谁签）——**真机教训**：不带任何
+        参数时服务端回 `10001`（参数错误）。参考实现的请求形态见 `api.sign_in`。
+        """
         if not self._has_credentials():
             return "没有授权，跳过（发 /ak skland login 扫码）"
         assert self._client is not None
-        payload = await asyncio.to_thread(self._client.sign_in)
-        data = payload.get("data") if isinstance(payload, Mapping) else None
-        if isinstance(data, Mapping) and data:
-            return "签到成功"
-        return "接口返回成功但响应体里没有 data（结构未验证，已如实记录）"
+
+        try:
+            uid = await asyncio.to_thread(self._client.binding_uid)
+        except api.SklandUnauthorized as exc:
+            self._forget_credentials("凭据已失效")
+            return f"凭据无效，需要重新授权（{exc}）。已清除本地凭据，请发 /ak skland login。"
+        except api.SklandLoginExpired as exc:
+            self._forget_credentials("登录已失效")
+            return f"登录已失效，需要重新授权（{exc}）。已清除本地凭据，请发 /ak skland login。"
+        except api.SklandError as exc:
+            return f"签到没做成：取绑定信息失败（{exc}）"
+
+        try:
+            payload = await asyncio.to_thread(self._client.sign_in, uid)
+        except api.SklandParamError as exc:
+            # 服务端在「今天已经签过」时**也用 10001**，只能靠 message 区分。
+            # 不区分它，用户签过一次之后每次都会看到「参数错误」，然后去查一个
+            # 并不存在的 bug——这正是本方法上一版的行为。
+            if api.already_signed_in(exc.payload):
+                return "今天已经签过了，不用重复签。"
+            return f"签到失败：{exc}"
+        except api.SklandUnauthorized as exc:
+            self._forget_credentials("凭据已失效")
+            return f"凭据无效，需要重新授权（{exc}）。已清除本地凭据，请发 /ak skland login。"
+        except api.SklandLoginExpired as exc:
+            self._forget_credentials("登录已失效")
+            return f"登录已失效，需要重新授权（{exc}）。已清除本地凭据，请发 /ak skland login。"
+        except api.SklandError as exc:
+            return f"签到失败：{exc}"
+
+        awards = api.sign_in_awards(payload)
+        if awards:
+            return "签到成功：" + "、".join(awards)
+        # 成功响应体仍未经真机验证（§9.5），所以**不编奖励**，只说签到了。
+        return "签到成功（接口没返回奖励明细，或今天已经签过）。"
 
     async def _do_check(self) -> str:
         """健康检查：打真实取数接口。
@@ -356,18 +390,35 @@ class SklandModule(Module):
             return True
 
         sub = self._parse_subcommand(str(getattr(event, "message_str", "") or ""))
-        if sub in ("", "status"):
-            await self._reply(event, self._status_text())
-        elif sub == "login":
-            await self._cmd_login(event)
-        elif sub == "logout":
-            await self._cmd_logout(event)
-        elif sub == "check":
-            await self._reply(event, await self._do_check())
-        elif sub == "signin":
-            await self._reply(event, await self._do_signin())
-        else:
-            await self._reply(event, f"未知的 skland 子命令：{sub}\n{_HELP}")
+        try:
+            if sub in ("", "status"):
+                await self._reply(event, self._status_text())
+            elif sub == "login":
+                await self._cmd_login(event)
+            elif sub == "logout":
+                await self._cmd_logout(event)
+            elif sub == "check":
+                await self._reply(event, await self._do_check())
+            elif sub == "signin":
+                await self._reply(event, await self._do_signin())
+            else:
+                await self._reply(event, f"未知的 skland 子命令：{sub}\n{_HELP}")
+        except Exception as exc:  # noqa: BLE001 - 见下方说明
+            # **不让异常冒到宿主**：宿主接住后只会打一段栈 + 一句「出现异常」，
+            # 用户看不懂、我们也丢掉了「是这条指令出的错」这个上下文。
+            #
+            # 但**绝不能吞掉**（本项目铁律：失败要显式）——所以这里
+            # ① 记 ERROR 日志（含栈，供排查）② 回一句带着原因的话。
+            #
+            # 为什么不放到 `core/` 做共享包装：`shift_reminder` 的命令处理路径
+            # 已经自己兜住了各类领域错误、且它的失败面（写配置、cron）与这里
+            # 不同；抽共享机制属于动核心，须单独裁决。本模块先自己兜住。
+            logger.exception("[ak_toolbox][skland] 处理子命令 %r 时出错", sub)
+            await self._reply(
+                event,
+                f"这条指令出错了：{type(exc).__name__}: {exc}\n"
+                "（已记进日志；换班提醒不受本模块影响，它照常工作。）",
+            )
         return True
 
     @staticmethod

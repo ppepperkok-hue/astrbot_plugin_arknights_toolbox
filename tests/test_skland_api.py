@@ -116,7 +116,7 @@ def test_signature_is_bound_to_the_actual_request_bytes() -> None:
 
     client = _client(handler, cred="cred", token="tok")
     client.player_info("42")  # GET，带 query
-    client.sign_in()  # POST，无 body
+    client.sign_in("42")  # POST，带 JSON body
 
     assert [item[0] for item in seen] == ["GET", "POST"]
 
@@ -133,14 +133,16 @@ def test_signature_is_bound_to_the_actual_request_bytes() -> None:
     )
     assert headers["sign"] == expected["sign"]
 
-    # POST：没有 body 时签的是空串（**这一步未经真机验证**，见 api.sign_in 的说明）
+    # POST：签的是**实际发出的 JSON 文本**（不是对象、也不是空串）。
+    # 这里用真实请求体重算，而不是硬编码一个空串——后者会在 body 出现的那一刻
+    # 悄悄失去意义（本测试此前正是这个形状）。
     _, url, headers, body = seen[1]
-    assert body is None
+    assert isinstance(body, bytes), "签到必须带 body"
     expected = api.sign_headers(
         cred="cred",
         token="tok",
         path=urllib.parse.urlsplit(url).path,  # 完整路径，不剥 /api/v1
-        query_or_body="",
+        query_or_body=body.decode("utf-8"),
         timestamp=int(headers["timestamp"]),
     )
     assert headers["sign"] == expected["sign"]
@@ -511,7 +513,7 @@ def test_cooldown_is_per_endpoint_so_a_multi_step_login_can_complete() -> None:
     )
 
     client.health_check()  # /game/player/binding
-    client.sign_in()  # /game/attendance —— 同一秒内，必须放行
+    client.sign_in("42")  # /game/attendance —— 同一秒内，必须放行
     assert [call[1].split("/api/v1")[-1] for call in client.calls] == [  # type: ignore[attr-defined]
         "/game/player/binding",
         "/game/attendance",
@@ -549,5 +551,73 @@ def test_signed_request_carries_content_type_for_post() -> None:
         return _json_response({"code": 0, "data": {}})
 
     client = _client(handler, cred="c", token="t")
-    client.sign_in()
+    client.sign_in("42")
     assert seen[0]["Content-Type"] == "application/json"
+
+
+# --- 签到的请求形态（真机 10001 的回归护栏）-------------------------------
+
+
+def test_sign_in_sends_game_id_and_uid_in_the_body() -> None:
+    """签到**必须带** `{"gameId": 1, "uid": ...}`。
+
+    真机教训：本方法原先不带任何参数，服务端回 `10001`（参数错误）。签到是账号级
+    操作，服务端要知道给谁签、签哪个游戏。形态由三个参考实现一致确认
+    （Morizero1125 `skland_auth.py:218`、Siq5005 `core_skland.py:753-754`、
+    qihang518887 `skland_api.py:435`）——**不是猜的**。
+
+    这条护栏钉的是**实际发出的字节**（签名正是对它算的）。
+    """
+    seen: list[tuple[str, bytes | None]] = []
+
+    def handler(method, url, headers, body):  # noqa: ANN001
+        seen.append((url, body))
+        return _json_response({"code": 0, "data": {"awards": []}})
+
+    client = _client(handler, cred="c", token="t")
+    client.sign_in("1234567890")
+
+    url, body = seen[0]
+    assert url.endswith("/api/v1/game/attendance"), url
+    assert isinstance(body, bytes), "签到必须带 body，否则服务端回 10001"
+    assert json.loads(body) == {"gameId": 1, "uid": "1234567890"}
+
+
+def test_already_signed_in_is_read_from_the_server_message() -> None:
+    """服务端在「今天已经签过」时**也用 10001**（与参数错误同码）。
+
+    不区分它，用户签过一次之后每次都会看到「参数错误」，然后去查一个并不存在的 bug。
+    判据只认服务端自己的措辞；判不出来就按真错误处理（**宁可报错，不假装成功**）。
+    """
+    already = {"code": 10001, "message": "今天已经签到过了", "data": None}
+    assert api.already_signed_in(already) is True
+
+    really_bad_param = {"code": 10001, "message": "参数错误", "data": None}
+    assert api.already_signed_in(really_bad_param) is False
+
+    # 判不出来的一律 False——不许"看着像就说是已签到"
+    assert api.already_signed_in({"code": 10001}) is False
+    assert api.already_signed_in("not a mapping") is False
+
+
+def test_sign_in_awards_are_read_from_the_reference_shape() -> None:
+    """奖励结构取自参考实现：`data.awards[]` 每项 `{resource: {name}, count}`。
+
+    取不到就返回空列表——调用方据此说「签到了但没读到明细」，**不编奖励数字**。
+    """
+    payload = {
+        "code": 0,
+        "data": {
+            "awards": [
+                {"resource": {"name": "合成玉"}, "count": 200},
+                {"resource": {"name": "龙门币"}, "count": 5000},
+                {"resource": {}, "count": 1},  # 没名字 → 跳过，不产出 "Nonex1"
+            ]
+        },
+    }
+    assert api.sign_in_awards(payload) == ["合成玉x200", "龙门币x5000"]
+
+    # 形状不对/缺失 → 空列表，绝不编
+    assert api.sign_in_awards({"code": 0, "data": {}}) == []
+    assert api.sign_in_awards({"code": 0}) == []
+    assert api.sign_in_awards(None) == []
