@@ -36,7 +36,7 @@ desc: |-
   3. 森空岛与 MAA 是可选功能，在插件配置页的「模块开关」里打开
 
   完整的指令清单、页面用法与「没收到提醒怎么查」，见仓库 README。
-version: 0.5.0
+version: 0.6.0
 author: ppepperkok-hue
 repo: https://github.com/ppepperkok-hue/astrbot_plugin_arknights_toolbox
 astrbot_version: ">=4.17.0"
