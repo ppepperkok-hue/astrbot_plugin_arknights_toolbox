@@ -9,6 +9,12 @@
         "description": "基建换班提醒",
         "hint": "按下面的三班定义注册定时提醒，在每班换班前若干分钟推送。需要先用 /ak bind 绑定提醒目标；未绑定时不会推送，只在日志里留一条警告。",
         "default": true
+      },
+      "recruit": {
+        "type": "bool",
+        "description": "公开招募计算",
+        "hint": "按游戏内的公开招募标签计算可能出现的干员、必出星级与推荐标签组合。纯本地计算，不联网、不需要账号，用量不限。",
+        "default": true
       }
     }
   },
@@ -95,6 +101,29 @@
         "description": "时区",
         "hint": "提醒按这个时区的时刻触发。必须写 IANA 时区名，例如 Asia/Shanghai、Asia/Tokyo、UTC；写错会在加载插件时明确报错，不会静默按别的时区跑。留空则使用默认值 Asia/Shanghai。",
         "default": "Asia/Shanghai"
+      }
+    }
+  },
+  "recruit": {
+    "type": "object",
+    "description": "公开招募计算模块",
+    "hint": "用法：私聊发 /ak recruit 标签1 标签2 …（例如 /ak recruit 输出 近战位）。不带标签时会列出全部可填标签。结果按 9:00:00 招募计算——招募时长不足时标签可能被系统划去，那时「必出」不再成立。",
+    "default": {
+      "max_operators": 20,
+      "max_combinations": 6
+    },
+    "items": {
+      "max_operators": {
+        "type": "int",
+        "description": "最多列出多少位候选干员",
+        "hint": "从高星往低星列，超出时会在消息里注明还剩多少位。默认 20，够看清高星候选，又不会把消息顶成一屏。",
+        "default": 20
+      },
+      "max_combinations": {
+        "type": "int",
+        "description": "最多列出多少组推荐标签组合",
+        "hint": "推荐的是「能保证最高星级」的极小组合；同样最优的组合很多时按这个数截断并注明还剩几组。默认 6。",
+        "default": 6
       }
     }
   }

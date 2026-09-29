@@ -327,17 +327,24 @@ def test_schema_seam_actually_loads_the_shift_module():
 
     S3 起 `modules` 段存在且 `shift_reminder` 默认开启，所以这里必须真的装载出
     `shift_reminder` —— 只断言「空注册表也不报错」等于什么都没测。
+
+    **不写死模块名单**：每加一个模块都得回来改测试的话，这条护栏迟早被人图省事
+    改成 `assert True`。改为「schema 里声明了几个开关，就应当装载出几个模块」，
+    这样它对新模块自动生效，且仍然钉住「声明与装载必须一致」。
     """
     if not SCHEMA_PATH.is_file():
         pytest.fail(f"缺少配置文件：{SCHEMA_PATH}")
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 
+    declared = set(schema["modules"]["items"])
     switches = read_module_switches(_default_config_from_schema(schema))
-    assert switches == {"shift_reminder": True}
+    assert set(switches) == declared, "schema 声明的开关与解析出来的开关必须一致"
+    assert all(switches.values()), f"schema 里的模块开关应当默认全开，实际 {switches}"
 
     discover_modules()
     registry = build_registry(switches)
-    assert registry.enabled_names == ("shift_reminder",)
+    assert set(registry.enabled_names) == declared
+    assert "shift_reminder" in registry.enabled_names
 
 
 # --- 模块自动发现 -----------------------------------------------------------
