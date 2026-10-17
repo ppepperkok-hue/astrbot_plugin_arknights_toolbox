@@ -1,11 +1,13 @@
+<div align="center">
+
 # 明日方舟工具箱
 
 <!-- moe-counter:start -->
-<p align="center">
-  <a href="https://github.com/journey-ad/Moe-Counter"><img src="https://count.getloli.com/get/@ppepperkok-hue.astrbot_plugin_arknights_toolbox?theme=asoul" alt="README views" width="360" /></a>
-  <br /><sub>README views · Image requests, not unique visitors.</sub>
-</p>
+<a href="https://github.com/journey-ad/Moe-Counter"><img src="https://count.getloli.com/get/@ppepperkok-hue.arknights-toolbox?theme=asoul" alt="README views" width="360" /></a>
+<br /><sub>README 阅读 · 按图片请求计数</sub>
 <!-- moe-counter:end -->
+
+</div>
 
 一个 AstrBot 插件，把《明日方舟》的几件日常小事装在一起：**换班提醒、公开招募计算、森空岛签到、MAA 远程启动**。四个功能各自独立开关，**默认只开最安全的两个**。
 
