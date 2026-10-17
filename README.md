@@ -4,7 +4,7 @@
 
 <!-- moe-counter:start -->
 <a href="https://github.com/journey-ad/Moe-Counter"><img src="https://count.getloli.com/get/@ppepperkok-hue.arknights-toolbox?theme=asoul" alt="README views" width="360" /></a>
-<br /><sub>README 阅读 · 按图片请求计数</sub>
+<br /><sub></sub>
 <!-- moe-counter:end -->
 
 </div>
