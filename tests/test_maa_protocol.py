@@ -95,7 +95,20 @@ def test_describe_payload_handles_nested_structures() -> None:
     assert _logged_leak(rendered, FAKE_USER) == []
 
 
-@pytest.mark.parametrize("value", [None, "a string", 42, ["x"], b"bytes"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "a string",
+        42,
+        ["x"],
+        b"bytes",
+        # `status` 是唯一允许渲染值的键；外部请求体可以给容器（不是合法协议值，
+        # 但端点匿名可达）。枚举判据会对值取哈希，容器会让渲染器抛 TypeError。
+        {"status": ["SUCCESS"]},
+        {"status": {"code": 1}},
+    ],
+)
 def test_describe_payload_never_raises_on_odd_inputs(value: object) -> None:
     """渲染器自己崩掉会把「请求到底来了没有」这条证据一起弄丢，所以它不许抛。"""
     assert isinstance(protocol.describe_payload(value), str)

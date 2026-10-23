@@ -165,7 +165,10 @@ def _render_field(key: str, value: object) -> str:
         # 身份标识：**只给类型与规模**。故意放在最前面，让「这两个键要特殊对待」
         # 在读代码时先撞到眼睛。
         return f"{key}=<{_type_name(value)}, len={_size_of(value)}>"
-    if key in VALUE_KEYS and value in STATUS_VALUES:
+    # 先判类型再判枚举：`value in STATUS_VALUES` 会对值取哈希，外部请求体里
+    # `status` 是数组/对象（不是合法协议值，但任何人都能 POST 进来）时会抛
+    # TypeError，把整条到达记录一起弄丢。
+    if key in VALUE_KEYS and isinstance(value, str) and value in STATUS_VALUES:
         return f"{key}={value}"
     if isinstance(value, bool):
         return f"{key}={value}"

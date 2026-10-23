@@ -232,6 +232,8 @@ def test_get_task_response_does_not_depend_on_the_request(monkeypatch) -> None:
         {"user": FAKE_USER, "device": FAKE_DEVICE},
         {"tasks": [{"id": "attacker", "type": "LinkStart"}]},
         {"user": {"nested": ["deep"]}},
+        # 非字符串的 `status`：日志渲染器曾在这里抛 TypeError，把响应变成 500。
+        {"status": ["SUCCESS"]},
         "not even an object",
         [1, 2, 3],
     ]
